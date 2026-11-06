@@ -47,6 +47,10 @@ def money(values: pd.Series, ccy: pd.Series | str) -> pd.Series:
     return pd.Series(np.where(digits, values.round(0), values.round(2)), index=values.index)
 
 
+def won(v: float) -> str:
+    return f"{'+' if v > 0 else '−' if v < 0 else ''}₩{abs(v):,.0f}"
+
+
 def fx_ticker(ccy: str) -> str:
     return "KRW=X" if ccy == "USD" else f"{ccy}KRW=X"
 
@@ -105,8 +109,8 @@ else:
 if ccys and not all(c in fx for c in ccys if c in set(tx["currency"]) | set(cash["currency"])):
     st.warning("환율을 받지 못한 통화가 있어 일부 원화 금액은 원가로 표시돼요.")
 
-tab_hold, tab_alloc, tab_tx, tab_real, tab_set = st.tabs(
-    ["보유 현황", "자산 배분·리밸런싱", "거래 입력·내역", "실현손익·배당", "설정"])
+tab_hold, tab_alloc, tab_tx, tab_real, tab_fx, tab_set = st.tabs(
+    ["보유 현황", "자산 배분·리밸런싱", "거래 입력·내역", "실현손익·배당", "달러 환전", "설정"])
 
 NUM = st.column_config.NumberColumn(format="localized")
 PCT = st.column_config.NumberColumn(format="%+.2f%%")
@@ -432,6 +436,78 @@ with tab_real:
             "계좌": ev["account_id"].map(acc_name).fillna(""),
         }), hide_index=True, width="stretch", column_config={"금액": NUM, "원화": NUM})
         st.caption("매도 손익 = 매도금액 − 수수료 − 매도수량 × 이동평균 평단. 원화 손익에는 환차손익이 포함돼요.")
+
+# ── 달러 환전 ─────────────────────────────────────────────
+with tab_fx:
+    try:
+        fx_log = pf.list_fx()
+    except Exception:
+        st.error("환전 기록 표가 없어요. Supabase에 `supabase/003_fx_exchanges.sql`을 적용해 주세요.")
+        fx_log = None
+    if fx_log is not None:
+        fx_ccys = sorted(set(fx_log["currency"]) | {"USD"})
+        ccy = st.radio("통화", fx_ccys, horizontal=True, key="fx-ccy") if len(fx_ccys) > 1 else "USD"
+        log = fx_log[fx_log["currency"] == ccy]
+        now_rate = fx.get(ccy)
+        summ = pf.fx_summary(log, now_rate)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("평균 환전 환율", f"{summ['avg_rate']:,.2f}" if summ["avg_rate"] else "–",
+                  help="지금까지 환전한 모든 금액의 평균 (시트의 '평균환율'과 같은 방식)")
+        c2.metric("현재 환율", f"{now_rate:,.2f}" if now_rate else "–",
+                  f"{now_rate - summ['avg_rate']:+,.2f}원" if now_rate and summ["avg_rate"] else None,
+                  delta_color="off")
+        c3.metric(f"총 환전 ({ccy})", f"{summ['bought']:,.2f}", help=f"원화 ₩{summ['bought_krw']:,.0f}")
+        c4.metric(f"재환전 안 한 {ccy}", f"{summ['held']:,.2f}",
+                  help=f"평단 {summ['held_avg_rate']:,.2f}원 (재환전해도 평단은 그대로인 이동평균)"
+                  if summ["held_avg_rate"] else None)
+        if summ["sold"] or summ["unrealized"] is not None:
+            parts = []
+            if summ["sold"]:
+                parts.append(f"재환전 {summ['sold']:,.2f} {ccy}, 환차손익 {won(summ['realized'])}")
+            if summ["unrealized"] is not None:
+                parts.append(f"남은 {ccy}(평단 {summ['held_avg_rate']:,.2f})를 지금 환율로 바꾸면 {won(summ['unrealized'])}")
+            st.caption(" · ".join(parts))
+        st.caption("환전한 달러로 산 주식은 거래 기록에 따로 있어요. 이 표는 평균 환전 환율을 보기 위한 기록이라 총 자산에는 더하지 않아요.")
+
+        with st.expander("환전 기록 추가", expanded=log.empty):
+            c1, c2, c3 = st.columns(3)
+            fside = c1.radio("구분", list(pf.FX_SIDES), format_func=pf.FX_SIDES.get, key="fx-side")
+            fdate = c2.date_input("날짜", today, key="fx-date")
+            fccy = c3.selectbox("통화", [c for c in CURRENCIES if c != "KRW"], key="fx-new-ccy")
+            c1, c2, c3 = st.columns(3)
+            famt = c1.number_input(f"금액 ({fccy})", min_value=0.0, step=100.0, format="%.2f", key="fx-amt")
+            frate = c2.number_input(f"환율 (원/{fccy})", min_value=0.0, value=float(fx.get(fccy, 0.0)), step=1.0,
+                                    format="%.2f", key="fx-rate")
+            ffee = c3.number_input("수수료 (원)", min_value=0.0, step=100.0, format="%.0f", key="fx-fee")
+            c1, c2 = st.columns([1, 2])
+            facc = c1.selectbox("계좌", acc_ids, format_func=lambda i: "선택 안 함" if i is None else acc_name[i],
+                                key="fx-account")
+            fmemo = c2.text_input("메모", placeholder="목표환율 도달, 채널 하단 터치 …", key="fx-memo")
+            if famt and frate:
+                st.caption(f"원화 {famt * frate:,.0f}원")
+            if st.button("환전 기록 저장", type="primary", disabled=not (famt > 0 and frate > 0), key="save-fx"):
+                pf.add_fx({"trade_date": fdate, "side": fside, "currency": fccy, "amount": famt, "rate": frate,
+                           "fee": ffee, "account_id": facc, "memo": fmemo or None})
+                for k in ("fx-amt", "fx-fee", "fx-memo"):
+                    st.session_state.pop(k, None)
+                st.rerun()
+
+        if not log.empty:
+            show = log.iloc[::-1]
+            st.dataframe(pd.DataFrame({
+                "id": show["id"], "날짜": show["trade_date"], "구분": show["side"].map(pf.FX_SIDES),
+                ccy: show["amount"], "환율": show["rate"], "원화": (show["amount"] * show["rate"]).round(0),
+                "수수료": show["fee"], "계좌": show["account_id"].map(acc_name).fillna(""), "메모": show["memo"].fillna(""),
+            }), hide_index=True, width="stretch", column_config={
+                "id": None, ccy: st.column_config.NumberColumn(format="localized"), "환율": NUM, "원화": NUM})
+            with st.expander("환전 기록 삭제"):
+                rows_by_id = log.set_index("id")
+                fdel = st.selectbox("삭제할 기록", list(show["id"]), key="fx-del", format_func=lambda i: (
+                    f"{rows_by_id.loc[i, 'trade_date']} {pf.FX_SIDES[rows_by_id.loc[i, 'side']]} "
+                    f"{rows_by_id.loc[i, 'amount']:,.2f} × {rows_by_id.loc[i, 'rate']:,.2f}"))
+                if st.button("삭제", key="fx-del-btn"):
+                    pf.delete_fx(int(fdel))
+                    st.rerun()
 
 # ── 설정 ───────────────────────────────────────────────────
 with tab_set:

@@ -366,6 +366,61 @@ def rebalance(summary: pd.DataFrame, new_money: float = 0.0, allow_sell: bool = 
     return df
 
 
+# ── 달러 환전 기록 ──────────────────────────────────────────
+
+FX_SIDES = {"buy": "환전 (원→외화)", "sell": "재환전 (외화→원)"}
+
+
+def list_fx() -> pd.DataFrame:
+    df = pd.DataFrame(_rows("fx_exchanges"),
+                      columns=["id", "trade_date", "side", "currency", "amount", "rate", "fee", "account_id", "memo"])
+    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    for c in ("amount", "rate", "fee"):
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    return df.sort_values(["trade_date", "id"], kind="stable").reset_index(drop=True)
+
+
+def add_fx(row: dict) -> None:
+    payload = {k: row.get(k) for k in ("trade_date", "side", "currency", "amount", "rate", "fee", "account_id", "memo")}
+    payload["trade_date"] = str(payload["trade_date"])
+    get_client().table("fx_exchanges").insert(payload).execute()
+
+
+def delete_fx(fx_id: int) -> None:
+    get_client().table("fx_exchanges").delete().eq("id", fx_id).execute()
+
+
+def fx_summary(fx: pd.DataFrame, current_rate: float | None = None) -> dict:
+    """환전 기록 요약 (한 통화).
+
+    avg_rate: 지금까지 환전한 모든 외화의 평균 환율 (시트의 '평균환율'과 같은 방식)
+    held / held_avg_rate: 재환전하지 않고 남은 외화와 그 평단(이동평균)
+    realized: 재환전으로 생긴 원화 손익 (재환전 금액 − 수수료 − 이동평균 원가)
+    unrealized: 남은 외화를 현재 환율로 바꾸면 생길 손익
+    """
+    buys = fx[fx["side"] == "buy"]
+    sells = fx[fx["side"] == "sell"]
+    bought = float(buys["amount"].sum())
+    bought_krw = float((buys["amount"] * buys["rate"] + buys["fee"]).sum())
+    tx = pd.DataFrame({"id": fx["id"], "trade_date": fx["trade_date"], "symbol": "FX", "side": fx["side"],
+                       "quantity": fx["amount"], "price": fx["rate"], "currency": "KRW", "fee": fx["fee"],
+                       "fx_rate": 1.0, "account_id": fx["account_id"], "memo": None})
+    pos, _ = compute_positions(tx)
+    p = pos.iloc[0] if not pos.empty else None
+    held = float(p["quantity"]) if p is not None else 0.0
+    held_cost = float(p["cost"]) if p is not None else 0.0
+    out = {
+        "bought": bought, "bought_krw": bought_krw, "avg_rate": bought_krw / bought if bought else None,
+        "sold": float(sells["amount"].sum()), "sold_krw": float((sells["amount"] * sells["rate"] - sells["fee"]).sum()),
+        "held": held, "held_cost": held_cost, "held_avg_rate": held_cost / held if held else None,
+        "realized": float(p["realized"]) if p is not None else 0.0,
+        "current_rate": current_rate, "unrealized": None,
+    }
+    if current_rate and held:
+        out["unrealized"] = held * current_rate - held_cost
+    return out
+
+
 # ── CSV 가져오기 ────────────────────────────────────────────
 
 CSV_HEADERS = ["날짜", "계좌", "구분", "티커", "종목명", "자산군", "수량", "가격", "통화", "수수료", "환율", "메모"]

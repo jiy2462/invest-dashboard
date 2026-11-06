@@ -21,7 +21,7 @@ streamlit run app.py
 - App settings → Secrets 에 `.streamlit/secrets.toml.example` 의 키를 실제 값으로 입력
 
 ## DB
-Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL을 번호 순서대로 적용한다 (`001_init.sql` → `002_portfolio.sql`).
+Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL을 번호 순서대로 적용한다 (`001_init.sql` → `002_portfolio.sql` → `003_fx_exchanges.sql`).
 
 ### 포트폴리오 계산 규칙
 - 평단은 이동평균법: 매도해도 평단은 그대로, 차액은 실현손익.
