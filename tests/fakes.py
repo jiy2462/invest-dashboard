@@ -24,7 +24,7 @@ def reset_db() -> None:
         for i, (s, n, g) in enumerate(rows)
     ]
     for t in ("assets", "watchlist", "chart_drawings", "accounts", "transactions", "target_allocation",
-              "cash_balances", "portfolio_snapshots", "app_settings", "fx_exchanges"):
+              "cash_balances", "portfolio_snapshots", "app_settings", "fx_exchanges", "backtest_presets"):
         TABLES[t] = []
 
 
@@ -138,6 +138,7 @@ KRX = pd.DataFrame([{"symbol": "005930.KS", "name": "삼성전자", "market": "K
 
 def install() -> None:
     """앱 모듈의 네트워크 함수를 가짜로 바꾼다."""
+    import lib.backtest as backtest
     import lib.charting as charting
     import lib.indicators as indicators
     import lib.kr_rates as kr_rates
@@ -147,7 +148,9 @@ def install() -> None:
     import lib.watchlist as watchlist
 
     reset_db()
-    indicators.get_client = watchlist.get_client = portfolio.get_client = lambda: FakeClient()
+    indicators.get_client = watchlist.get_client = portfolio.get_client = backtest.get_client = lambda: FakeClient()
+    backtest.fetch_history = fake_history
+    backtest.fetch_fred_krw = lambda: fake_history(("DEXKOUS",))["DEXKOUS"]
     market.fetch_yf_closes = fake_closes
     market.fetch_yf_ohlc = lambda syms: {s: fake_ohlcv(s, "1d") for s in syms if s in BASE}
     market.validate_yf_symbol = lambda s: s in BASE
@@ -161,3 +164,27 @@ def install() -> None:
     symbols.krx_listing = lambda: KRX
     symbols.yf_search = lambda q: [{"symbol": "AAPL", "name": "Apple Inc.", "market": "NASDAQ"}] if "app" in q.lower() else []
     symbols.currency_for = lambda s: "KRW" if s.endswith(".KS") else "USD"
+
+
+# 백테스트용 긴 시세: 티커별 첫 거래일 (실제와 비슷하게)
+HIST_START = {"SPY": "1993-01-29", "VFINX": "1980-01-02", "^GSPC": "1985-01-02", "QQQ": "1999-03-10",
+              "^NDX": "1985-10-01", "TLT": "2002-07-30", "VUSTX": "1986-05-19", "IEF": "2002-07-30",
+              "VFITX": "1991-10-28", "GLD": "2004-11-18", "GC=F": "2000-08-30", "BIL": "2007-05-30",
+              "^IRX": "1985-01-02", "KRW=X": "2003-12-01", "DEXKOUS": "1981-04-13", "069500.KS": "2002-10-14",
+              "^KS11": "1996-07-01", "DBC": "2006-02-06", "BTC-USD": "2014-09-17", "SCHD": "2011-10-20"}
+HIST_LEVEL = {"^IRX": 4.0, "KRW=X": 1200.0, "DEXKOUS": 1100.0}
+
+
+def fake_history(tickers) -> dict[str, pd.Series]:
+    out = {}
+    for t in tickers:
+        if t not in HIST_START:
+            continue
+        idx = pd.bdate_range(HIST_START[t], "2026-11-05")
+        rng = np.random.default_rng(sum(map(ord, t)))
+        if t in HIST_LEVEL:  # 금리·환율: 수준 주변에서 출렁임
+            vals = HIST_LEVEL[t] * np.exp(np.cumsum(rng.normal(0, 0.002, len(idx))))
+        else:
+            vals = 100 * np.exp(np.cumsum(rng.normal(0.0003, 0.01, len(idx))))
+        out[t] = pd.Series(vals, index=idx)
+    return out
