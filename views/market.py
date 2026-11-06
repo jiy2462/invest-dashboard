@@ -3,7 +3,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from lib import indicators
-from lib.market import load_series, summarize, validate_yf_symbol
+from lib.charting import MA_COLORS
+from lib.market import load_ohlc, summarize, validate_yf_symbol
 
 UP, DOWN, FLAT = "#d62728", "#1f5fbf", "#888888"  # 한국식: 상승 빨강, 하락 파랑
 
@@ -18,22 +19,63 @@ def fmt_value(v: float, is_rate: bool) -> str:
     return f"{v:,.2f}"
 
 
-def sparkline(s: pd.Series, color: str) -> go.Figure:
-    fig = go.Figure(go.Scatter(x=s.index, y=s.values, mode="lines", line=dict(color=color, width=1.6),
-                               hovertemplate="%{x|%m/%d} %{y:,.2f}<extra></extra>"))
-    fig.update_layout(height=70, margin=dict(l=0, r=0, t=0, b=0), showlegend=False,
-                      xaxis=dict(visible=False), yaxis=dict(visible=False),
+MINI_DAYS = 90  # 카드에 보여줄 기간
+MINI_MAS = (50, 200)
+
+
+def mini_chart(df: pd.DataFrame, candles: bool) -> go.Figure:
+    """최근 90일 일봉 + 50일선·200일선. 이동평균은 전체 과거로 계산하고 화면에서만 자른다.
+
+    x축은 날짜를 글자로 둬서 주말·휴장일 빈칸 없이 봉이 붙어 보이게 한다.
+    """
+    mas = {n: df["Close"].rolling(n).mean() for n in MINI_MAS}
+    cutoff = df.index[-1] - pd.Timedelta(days=MINI_DAYS)
+    view = df[df.index >= cutoff]
+    x = view.index.strftime("%y/%m/%d")
+    fig = go.Figure()
+    if candles:
+        fig.add_trace(go.Candlestick(
+            x=x, open=view["Open"], high=view["High"], low=view["Low"], close=view["Close"], name="",
+            increasing=dict(line=dict(color=UP, width=1), fillcolor=UP),
+            decreasing=dict(line=dict(color=DOWN, width=1), fillcolor=DOWN),
+            hoverinfo="x+y",
+        ))
+    else:  # 종가만 있는 지표 (한국 금리)
+        fig.add_trace(go.Scatter(x=x, y=view["Close"], mode="lines", line=dict(color="#555", width=1.4),
+                                 name="", hovertemplate="%{x} %{y:,.3f}<extra></extra>"))
+    for n, ma in mas.items():
+        m = ma[ma.index >= cutoff]
+        if m.notna().any():
+            fig.add_trace(go.Scatter(x=x, y=m.values, mode="lines", name=f"{n}일선",
+                                     line=dict(color=MA_COLORS[n], width=1.2),
+                                     hovertemplate=f"{n}일선 %{{y:,.2f}}<extra></extra>"))
+    fig.update_layout(height=150, margin=dict(l=0, r=0, t=0, b=0), showlegend=False,
+                      xaxis=dict(visible=False, type="category", rangeslider=dict(visible=False)),
+                      yaxis=dict(visible=False), hovermode="x unified", dragmode=False,
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
     return fig
 
 
-def card(name: str, symbol: str, series: pd.Series | None, is_rate: bool, error: str | None) -> None:
+def ma_legend(df: pd.DataFrame) -> str:
+    """카드 아래 범례: 지금 가격이 50일선·200일선 위인지 아래인지."""
+    last = float(df["Close"].iloc[-1])
+    parts = []
+    for n in MINI_MAS:
+        if len(df) < n:
+            continue
+        ma = float(df["Close"].rolling(n).mean().iloc[-1])
+        pos = "위" if last >= ma else "아래"
+        parts.append(f"<span style='white-space:nowrap'><span style='color:{MA_COLORS[n]}'>━</span> {n}일 {pos}</span>")
+    return " &nbsp;".join(parts)
+
+
+def card(name: str, symbol: str, df: pd.DataFrame | None, is_rate: bool, error: str | None) -> None:
     with st.container(border=True):
-        if series is None:
+        if df is None or df.empty:
             st.markdown(f"**{name}**")
             st.caption(error or f"`{symbol}` 시세를 못 받았어요")
             return
-        s = summarize(series, is_rate)
+        s = summarize(df["Close"], is_rate)
         color = UP if s["change"] > 0 else DOWN if s["change"] < 0 else FLAT
         arrow = "▲" if s["change"] > 0 else "▼" if s["change"] < 0 else "–"
         delta = f"{arrow} {abs(s['bp']):.1f}bp" if is_rate else f"{arrow} {abs(s['pct']):.2f}%"
@@ -43,8 +85,12 @@ def card(name: str, symbol: str, series: pd.Series | None, is_rate: bool, error:
             f"<div style='color:{color};font-size:0.9rem'>{delta}</div>",
             unsafe_allow_html=True,
         )
-        st.plotly_chart(sparkline(s["spark"], color), width="stretch",
-                        config={"displayModeBar": False}, key=f"spark-{symbol}")
+        has_ohlc = not (df["High"] == df["Low"]).all()
+        st.plotly_chart(mini_chart(df, candles=has_ohlc), width="stretch",
+                        config={"displayModeBar": False, "scrollZoom": False}, key=f"mini-{symbol}")
+        legend = ma_legend(df)
+        st.markdown(f"<div style='font-size:0.75rem;opacity:.8'>{legend}</div>" if legend else "",
+                    unsafe_allow_html=True)
         st.caption(f"{s['asof']:%Y-%m-%d} 기준")
 
 
@@ -62,7 +108,7 @@ with tab_view:
         st.info("보이는 지표가 없어요. ‘지표 편집’에서 추가해 주세요.")
     else:
         with st.spinner("시세를 불러오는 중…"):
-            data, errors = load_series(visible)
+            data, errors = load_ohlc(visible)
         if st.button("새로고침", help="시세는 15분 동안 캐시돼요"):
             st.cache_data.clear()
             st.rerun()

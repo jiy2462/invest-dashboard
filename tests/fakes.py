@@ -149,6 +149,7 @@ def install() -> None:
     reset_db()
     indicators.get_client = watchlist.get_client = portfolio.get_client = lambda: FakeClient()
     market.fetch_yf_closes = fake_closes
+    market.fetch_yf_ohlc = lambda syms: {s: fake_ohlcv(s, "1d") for s in syms if s in BASE}
     market.validate_yf_symbol = lambda s: s in BASE
     market.auto_price = lambda s: AUTO_PRICES.get(s)
     charting.fetch_ohlcv = fake_ohlcv
