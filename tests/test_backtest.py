@@ -147,3 +147,14 @@ def test_months_to_recover_principal():
     assert pr["recovered"] and round(pr["months"]) == 10
     still = bt.longest_spell(pd.Series([False, True, True], index=idx[:3]))
     assert not still["recovered"] and still["end"] == idx[2]
+
+
+def test_semiannual_rebalance_happens_in_january_and_july():
+    idx = pd.bdate_range("2020-01-01", "2021-12-31")
+    prices = pd.DataFrame({"A": pd.Series(np.linspace(100, 300, len(idx)), index=idx), "B": 100.0})
+    q = bt.simulate(prices, {"A": 50, "B": 50}, 1000, 0, "quarterly")
+    h = bt.simulate(prices, {"A": 50, "B": 50}, 1000, 0, "semiannual")
+    y = bt.simulate(prices, {"A": 50, "B": 50}, 1000, 0, "yearly")
+    assert q["value"].iloc[-1] < h["value"].iloc[-1] < y["value"].iloc[-1]   # 오르는 자산을 덜어내는 횟수만큼
+    assert bt._period_key(pd.Timestamp("2020-06-30"), "semiannual") != bt._period_key(pd.Timestamp("2020-07-01"), "semiannual")
+    assert "semiannual" in bt.REBALANCE
