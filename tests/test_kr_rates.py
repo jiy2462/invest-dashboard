@@ -58,3 +58,32 @@ def test_falls_back_to_ecos_and_reports_both(monkeypatch):
     out, errors = market.load_series([{"symbol": "ecos:KR10Y", "source": "ecos"}])
     assert not out
     assert "네이버" in errors["ecos:KR10Y"] and "ECOS" in errors["ecos:KR10Y"]
+
+
+def test_investing_first_and_all_reasons(monkeypatch):
+    calls = []
+
+    def inv(code):
+        calls.append(("inv", code))
+        raise RuntimeError("403 Forbidden")
+
+    def bond(code):
+        calls.append(("bond", code))
+        raise kr_rates.KrRateError("네이버 KR10YT=RR: 응답에서 값을 찾지 못했어요")
+
+    monkeypatch.setattr(kr_rates, "fetch_investing", inv)
+    monkeypatch.setattr(kr_rates, "fetch_naver_bond", bond)
+    try:
+        kr_rates.fetch("ecos:KR10Y")
+        raise AssertionError("실패해야 함")
+    except kr_rates.KrRateError as e:
+        msg = str(e)
+    assert calls[0] == ("inv", "KR10YT=RR")
+    assert "Investing RuntimeError (403 Forbidden)" in msg and "네이버" in msg
+
+
+def test_investing_success_short_circuits(monkeypatch):
+    s = pd.Series({pd.Timestamp("2026-11-05"): 2.95})
+    monkeypatch.setattr(kr_rates, "fetch_investing", lambda code: s)
+    monkeypatch.setattr(kr_rates, "fetch_naver_daily", lambda code: (_ for _ in ()).throw(AssertionError("호출 안 돼야 함")))
+    assert kr_rates.fetch("ecos:CD91").iloc[-1] == 2.95

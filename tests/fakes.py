@@ -153,10 +153,10 @@ def install() -> None:
     market.auto_price = lambda s: AUTO_PRICES.get(s)
     charting.fetch_ohlcv = fake_ohlcv
 
-    def no_kr_rates(symbol):
-        raise kr_rates.KrRateError("네이버 테스트: 접속 안 함")
+    def offline(code, *a, **k):
+        raise kr_rates.KrRateError("테스트: 접속 안 함")
 
-    kr_rates.fetch = no_kr_rates
+    kr_rates.fetch_investing = kr_rates.fetch_naver_daily = kr_rates.fetch_naver_bond = offline
     symbols.krx_listing = lambda: KRX
     symbols.yf_search = lambda q: [{"symbol": "AAPL", "name": "Apple Inc.", "market": "NASDAQ"}] if "app" in q.lower() else []
     symbols.currency_for = lambda s: "KRW" if s.endswith(".KS") else "USD"
