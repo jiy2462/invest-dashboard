@@ -11,7 +11,7 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-from lib import kr_rates, market_hours
+from lib import fear_greed, kr_rates, market_hours
 
 # ECOS 시장금리(일별) 통계표 817Y002의 항목 코드
 ECOS_SERIES = {
@@ -146,6 +146,20 @@ def ecos_key() -> str:
         return ""
 
 
+def _fetch_extra(sym: str, key: str) -> tuple[pd.Series | None, str | None]:
+    """야후 밖의 지표 하나: CNN 공포·탐욕 지수 또는 한국 금리."""
+    if sym.startswith("cnn:"):
+        if sym != fear_greed.SYMBOL:
+            return None, f"`{sym}`은 아직 지원하지 않는 CNN 지표예요"
+        try:
+            return fear_greed.fetch(), None
+        except fear_greed.FearGreedError as e:
+            return None, str(e)
+        except Exception as e:
+            return None, f"CNN {type(e).__name__}"
+    return _kr_rate(sym, key)
+
+
 def _kr_rate(sym: str, key: str) -> tuple[pd.Series | None, str | None]:
     """한국 금리 하나: Investing.com → 네이버 금융 → (키가 있으면) 한국은행 ECOS 순서."""
     if sym not in ECOS_SERIES and sym not in kr_rates.SUPPORTED:
@@ -174,7 +188,7 @@ def load_ohlc_uncached(yf_symbols: tuple[str, ...], kr_symbols: tuple[str, ...],
     errors: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=1 + max(1, len(kr_symbols))) as pool:
         yf_job = pool.submit(fetch_yf_ohlc, yf_symbols)
-        kr_jobs = {sym: pool.submit(_kr_rate, sym, key) for sym in kr_symbols}
+        kr_jobs = {sym: pool.submit(_fetch_extra, sym, key) for sym in kr_symbols}
         try:
             out.update(yf_job.result())
         except Exception:
@@ -190,6 +204,8 @@ def load_ohlc_uncached(yf_symbols: tuple[str, ...], kr_symbols: tuple[str, ...],
             errors[sym] = f"`{sym}` 시세를 못 받았어요"
     return out, errors
 
+
+EXTRA_SOURCES = ("ecos", "cnn")  # 야후 밖에서 지표마다 따로 받는 출처
 
 LIVE_TTL = timedelta(minutes=5)   # 열린 장: 5분마다 새로
 RETRY_TTL = timedelta(minutes=5)  # 못 받은 지표: 5분 뒤 다시 시도
@@ -235,7 +251,7 @@ def load_ohlc(settings: list[dict], cached: bool = True,
     한국 금리처럼 종가만 있는 지표는 시가·고가·저가를 종가로 채운다.
     """
     yf_symbols = tuple(sorted({s["symbol"] for s in settings if s["source"] == "yfinance"}))
-    kr_symbols = tuple(sorted({s["symbol"] for s in settings if s["source"] == "ecos"}))
+    kr_symbols = tuple(sorted({s["symbol"] for s in settings if s["source"] in EXTRA_SOURCES}))
     if not cached:
         return load_ohlc_uncached(yf_symbols, kr_symbols, ecos_key() if kr_symbols else "")
 
