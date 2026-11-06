@@ -9,5 +9,8 @@ def fresh():
     import streamlit as st
 
     st.cache_data.clear()
+    from lib import market
+
+    market.clear_cache()
     fakes.install()
     fakes._installed = True

@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import requests
 import streamlit as st
 import yfinance as yf
 
-from lib import kr_rates
+from lib import kr_rates, market_hours
 
 # ECOS 시장금리(일별) 통계표 817Y002의 항목 코드
 ECOS_SERIES = {
@@ -184,23 +185,74 @@ def load_ohlc_uncached(yf_symbols: tuple[str, ...], kr_symbols: tuple[str, ...],
     return out, errors
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def load_ohlc_cached(yf_symbols: tuple[str, ...], kr_symbols: tuple[str, ...],
-                     key: str) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
-    """15분 캐시. 실패한 지표도 캐시해서 다시 그릴 때마다 시간 초과를 기다리지 않는다."""
-    return load_ohlc_uncached(yf_symbols, kr_symbols, key)
+LIVE_TTL = timedelta(minutes=5)   # 열린 장: 5분마다 새로
+RETRY_TTL = timedelta(minutes=5)  # 못 받은 지표: 5분 뒤 다시 시도
 
 
-def load_ohlc(settings: list[dict], cached: bool = True) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+@st.cache_resource
+def _store() -> dict:
+    """지표별 시세 저장소 (서버 메모리, 모든 접속이 같이 씀). {symbol: {"df", "err", "at"}}"""
+    return {"data": {}, "lock": threading.Lock()}
+
+
+def clear_cache() -> None:
+    st_ = _store()
+    with st_["lock"]:
+        st_["data"].clear()
+
+
+def is_fresh(symbol: str, entry: dict | None, now: datetime) -> bool:
+    """다시 받을 필요가 없는가.
+
+    - 못 받은 지표: 5분 지나면 다시 시도
+    - 열린 장(마감 직후 20분 포함): 5분 지나면 다시
+    - 닫힌 장: 마감 뒤에 한 번 받았으면 다음 장이 열릴 때까지 그대로
+    """
+    if not entry:
+        return False
+    if entry.get("retry_at") and now < entry["retry_at"]:
+        return True
+    age = now - entry["at"]
+    if entry["df"] is None:
+        return age < RETRY_TTL
+    if market_hours.is_live(symbol, now):
+        return age < LIVE_TTL
+    closed = market_hours.last_close(market_hours.market_of(symbol), now)
+    return closed is None or entry["at"] >= closed + market_hours.GRACE
+
+
+def load_ohlc(settings: list[dict], cached: bool = True,
+              now: datetime | None = None) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
     """지표 설정 목록에 대해 ({symbol: 일봉 DataFrame}, {symbol: 못 받은 이유})를 돌려준다.
 
+    장이 닫힌 지표는 저장해 둔 값을 쓰고, 다시 받아야 하는 지표만 한 번에 묶어 받는다.
     한국 금리처럼 종가만 있는 지표는 시가·고가·저가를 종가로 채운다.
     """
     yf_symbols = tuple(sorted({s["symbol"] for s in settings if s["source"] == "yfinance"}))
     kr_symbols = tuple(sorted({s["symbol"] for s in settings if s["source"] == "ecos"}))
-    key = ecos_key() if kr_symbols else ""
-    fn = load_ohlc_cached if cached else load_ohlc_uncached
-    return fn(yf_symbols, kr_symbols, key)
+    if not cached:
+        return load_ohlc_uncached(yf_symbols, kr_symbols, ecos_key() if kr_symbols else "")
+
+    now = now or datetime.now(timezone.utc)
+    store = _store()
+    with store["lock"]:
+        data = store["data"]
+        stale_yf = tuple(s for s in yf_symbols if not is_fresh(s, data.get(s), now))
+        stale_kr = tuple(s for s in kr_symbols if not is_fresh(s, data.get(s), now))
+        if stale_yf or stale_kr:
+            got, errs = load_ohlc_uncached(stale_yf, stale_kr, ecos_key() if stale_kr else "")
+            for sym in stale_yf + stale_kr:
+                old = data.get(sym)
+                if sym in got:
+                    data[sym] = {"df": got[sym], "err": None, "at": now}
+                elif old and old["df"] is not None:  # 이번에 실패하면 예전 값을 계속 보여 준다
+                    data[sym] = {**old, "retry_at": now + RETRY_TTL}
+                else:
+                    data[sym] = {"df": None, "err": errs.get(sym), "at": now}
+        out = {s: data[s]["df"] for s in yf_symbols + kr_symbols if data[s]["df"] is not None}
+        errors = {s: data[s]["err"] or f"`{s}` 시세를 못 받았어요"
+                  for s in yf_symbols + kr_symbols if data[s]["df"] is None}
+    return out, errors
 
 
 def load_series(settings: list[dict]) -> tuple[dict[str, pd.Series], dict[str, str]]:

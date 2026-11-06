@@ -2,9 +2,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from lib import indicators
+from lib import indicators, market_hours
 from lib.charting import MA_COLORS
-from lib.market import load_ohlc, summarize, validate_yf_symbol
+from lib.market import clear_cache, load_ohlc, summarize, validate_yf_symbol
 
 UP, DOWN, FLAT = "#d62728", "#1f5fbf", "#888888"  # 한국식: 상승 빨강, 하락 파랑
 
@@ -91,7 +91,7 @@ def card(name: str, symbol: str, df: pd.DataFrame | None, is_rate: bool, error: 
         legend = ma_legend(df)
         st.markdown(f"<div style='font-size:0.75rem;opacity:.8'>{legend}</div>" if legend else "",
                     unsafe_allow_html=True)
-        st.caption(f"{s['asof']:%Y-%m-%d} 기준")
+        st.caption(f"{s['asof']:%Y-%m-%d} 기준 · {market_hours.status(symbol)}")
 
 
 try:
@@ -109,7 +109,8 @@ with tab_view:
     else:
         with st.spinner("시세를 불러오는 중…"):
             data, errors = load_ohlc(visible)
-        if st.button("새로고침", help="시세는 15분 동안 캐시돼요"):
+        if st.button("새로고침", help="열린 장은 5분마다, 닫힌 장은 마감 뒤 한 번만 새로 받아요. 누르면 모두 다시 받아요."):
+            clear_cache()
             st.cache_data.clear()
             st.rerun()
         groups: dict[str, list[dict]] = {}
