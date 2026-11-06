@@ -68,12 +68,11 @@ def donut(parts: pd.DataFrame, total: float) -> go.Figure:
     fig = go.Figure(go.Pie(
         labels=parts["label"], values=parts["value"], hole=0.58, sort=False, direction="clockwise",
         marker=dict(colors=colors, line=dict(color="rgba(255,255,255,0.9)", width=2)),
-        textinfo="percent", textposition="inside", insidetextorientation="horizontal",
-        texttemplate="%{percent:.0%}", textfont=dict(color="white", size=13),
+        textinfo="label+percent", textposition="outside", texttemplate="%{label}<br>%{percent:.1%}",
+        textfont=dict(size=12), outsidetextfont=dict(size=12), automargin=True,
         hovertemplate="%{label}<br>₩%{value:,.0f} · %{percent:.1%}<extra></extra>",
     ))
-    fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=10), showlegend=True,
-                      legend=dict(orientation="v", x=1.0, y=0.5, font=dict(size=12)),
+    fig.update_layout(height=380, margin=dict(l=60, r=60, t=40, b=40), showlegend=False,
                       annotations=[dict(text=f"총 평가<br><b>₩{total / 1e4:,.0f}만</b>", x=0.5, y=0.5,
                                         showarrow=False, font=dict(size=15))],
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
@@ -263,15 +262,32 @@ with tab_hold:
         st.rerun()
     if sel_acc:
         st.caption("계좌 필터와 상관없이 전체 현금성 자산을 편집해요.")
-    notes = targets[(targets["status_note"].notna()) | (targets["strategy"].notna())]
-    if not notes.empty:
-        st.markdown("**자산군별 현황·전략 메모**")
-        for _, t in notes.iterrows():
-            with st.expander(t["asset_class"]):
-                if pd.notna(t["status_note"]):
-                    st.markdown(f"**현황** · {t['status_note']}")
-                if pd.notna(t["strategy"]):
-                    st.markdown(f"**전략** · {t['strategy']}")
+    st.markdown("**자산군별 전략 메모**")
+    st.caption("펼쳐서 내용을 고치고 저장하거나, 메모를 삭제할 수 있어요. 삭제해도 자산군과 목표 비중은 그대로예요.")
+    notes = targets[targets["strategy"].notna()]
+    for _, t in notes.iterrows():
+        cls = t["asset_class"]
+        with st.expander(cls):
+            txt = st.text_area("전략", t["strategy"], key=f"memo-{cls}", height=160, label_visibility="collapsed")
+            m1, m2, _ = st.columns([1, 1, 5])
+            if m1.button("저장", key=f"memo-save-{cls}", type="primary", disabled=txt == t["strategy"]):
+                pf.save_strategy(cls, txt)
+                st.toast(f"{cls} 전략을 저장했어요.")
+                st.rerun()
+            if m2.button("삭제", key=f"memo-del-{cls}"):
+                pf.save_strategy(cls, None)
+                st.toast(f"{cls} 전략 메모를 지웠어요.")
+                st.rerun()
+    free = [c for c in targets["asset_class"] if c not in set(notes["asset_class"])]
+    if free:
+        with st.expander("＋ 전략 메모 추가"):
+            n_cls = st.selectbox("자산군", free, key="memo-new-class")
+            n_txt = st.text_area("전략", key="memo-new-text", height=120)
+            if st.button("추가", key="memo-add", disabled=not n_txt.strip()):
+                pf.save_strategy(n_cls, n_txt)
+                st.rerun()
+    elif targets.empty:
+        st.caption("설정 탭에서 자산군을 먼저 만들면 메모를 쓸 수 있어요.")
 
 
 # ── 매수 입력 ─────────────────────────────────────────────
@@ -641,15 +657,14 @@ with tab_set:
         pf.set_setting("goal_total", g)
         st.rerun()
     edited = st.data_editor(
-        targets[["asset_class", "target_weight", "monthly_contribution", "target_return", "status_note", "strategy"]],
+        targets[["asset_class", "target_weight", "monthly_contribution", "target_return", "strategy"]],
         num_rows="dynamic", hide_index=True, width="stretch", key="targets-editor",
         column_config={
             "asset_class": st.column_config.TextColumn("자산군", required=True),
             "target_weight": st.column_config.NumberColumn("목표 비중(%)", min_value=0, max_value=100, format="%.1f"),
             "monthly_contribution": st.column_config.NumberColumn("월 적립 목표(원)", min_value=0, format="localized"),
             "target_return": st.column_config.NumberColumn("목표 수익률(%)", format="%.1f"),
-            "status_note": st.column_config.TextColumn("현황", width="medium"),
-            "strategy": st.column_config.TextColumn("트레이딩 전략", width="large"),
+            "strategy": st.column_config.TextColumn("전략", width="large"),
         })
     wsum = pd.to_numeric(edited["target_weight"], errors="coerce").fillna(0).sum()
     st.caption(f"목표 비중 합계 {wsum:g}%" + ("" if abs(wsum - 100) < 0.01 or wsum == 0 else " (100%가 아니에요)"))

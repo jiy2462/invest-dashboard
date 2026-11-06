@@ -78,7 +78,21 @@ def list_targets() -> pd.DataFrame:
     df = pd.DataFrame(_rows("target_allocation", "sort_order"),
                       columns=["asset_class", "target_weight", "monthly_contribution", "target_return",
                                "status_note", "strategy", "sort_order"])
+    # 예전 '현황'(status_note)은 '전략' 하나로 합쳐 보여 준다. 다음 저장 때 strategy 에 합쳐 저장된다.
+    df["strategy"] = pd.Series([merge_notes(a, b) for a, b in zip(df["status_note"], df["strategy"])],
+                               index=df.index, dtype=object)
+    df["status_note"] = None
     return df.sort_values("sort_order", kind="stable").reset_index(drop=True)
+
+
+def merge_notes(*parts) -> str | None:
+    return "\n\n".join(t for t in (_txt(p) for p in parts) if t) or None
+
+
+def save_strategy(asset_class: str, text: str | None) -> None:
+    """자산군 하나의 전략 메모를 저장한다. 빈 값이면 메모를 지운다(자산군·목표 비중은 그대로)."""
+    get_client().table("target_allocation").update(
+        {"strategy": _txt(text), "status_note": None}).eq("asset_class", asset_class).execute()
 
 
 def save_targets(edited: pd.DataFrame, original: pd.DataFrame) -> None:
