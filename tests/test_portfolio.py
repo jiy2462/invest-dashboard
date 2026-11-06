@@ -183,7 +183,8 @@ def test_portfolio_page_with_data():
     seed()
     at = run("portfolio")
     assert not at.exception
-    assert [t.label for t in at.tabs] == ["보유 현황", "자산 배분·리밸런싱", "거래 입력·내역", "실현손익·배당", "달러 환전", "설정"]
+    assert [t.label for t in at.tabs] == ["보유 현황", "매수 입력", "자산 배분·리밸런싱", "매도·배당·거래 내역",
+                                           "실현손익·배당", "달러 환전", "설정"]
     assert at.metric[0].label == "총 평가금액"
     assert any(s.value == "리밸런싱" for s in at.subheader)
     md = " ".join(m.value for m in at.markdown)
@@ -199,6 +200,7 @@ def test_portfolio_page_with_data():
 def test_add_transactions_and_snapshot():
     seed()
     at = run("portfolio")
+    at.radio(key="tx-side").set_value("buy").run()
     at.selectbox(key="tx-symbol").set_value("SPYM").run()
     at.number_input(key="tx-qty").set_value(3).run()
     at.number_input(key="tx-price").set_value(86.5).run()
@@ -238,18 +240,67 @@ def test_parse_naver_close():
     assert parse_naver_close("") is None
 
 
+def holdings(at):
+    return next(d.value for d in at.dataframe if "시세" in d.value.columns)
+
+
+def test_buy_tab_saves_transaction():
+    seed()
+    at = run("portfolio")
+    at.selectbox(key="buy-symbol").set_value("SPYM").run()
+    assert at.selectbox(key="buy-account-SPYM").value == 2      # 마지막으로 쓴 계좌가 기본
+    at.date_input(key="buy-date").set_value(date(2026, 11, 5))
+    at.number_input(key="buy-qty").set_value(4)
+    at.number_input(key="buy-price").set_value(88.25)
+    at.number_input(key="buy-fx").set_value(1450)
+    at.text_input(key="buy-memo").set_value("정기 매수")
+    next(b for b in at.button if b.label == "매수 저장").click().run()
+    assert not at.exception
+    t = fakes.TABLES["transactions"][-1]
+    assert (t["symbol"], t["side"], t["quantity"], t["price"], t["fx_rate"], t["account_id"], t["memo"]) == \
+        ("SPYM", "buy", 4, 88.25, 1450, 2, "정기 매수")
+    assert str(t["trade_date"]) == "2026-11-05"
+    assert any("SPYM" in s.value or "4주" in s.value for s in at.success)
+
+
+def test_save_cash_maps_accounts_and_default_class():
+    seed()
+    orig = pf.list_cash()
+    edited = pd.DataFrame([
+        {"id": 1, "name": "RP", "asset_class": "투자유보현금", "account": "ISA", "currency": "KRW",
+         "amount": 2000000, "memo": None},
+        {"id": None, "name": "예수금", "asset_class": None, "account": None, "currency": "KRW",
+         "amount": 50000, "memo": "메모"},
+    ])
+    pf.save_cash(edited, orig, {"ISA": 1})
+    rows = {r["name"]: r for r in fakes.TABLES["cash_balances"]}
+    assert rows["RP"]["amount"] == 2000000 and rows["RP"]["account_id"] == 1
+    assert rows["예수금"]["asset_class"] == "투자유보현금" and rows["예수금"]["account_id"] is None
+    pf.save_cash(edited.iloc[[1]].assign(id=[max(r["id"] for r in fakes.TABLES["cash_balances"])]),
+                 pd.DataFrame(fakes.TABLES["cash_balances"]))
+    assert [r["name"] for r in fakes.TABLES["cash_balances"]] == ["예수금"]
+
+
+def test_pie_chart_shown():
+    seed()
+    at = run("portfolio")
+    assert not at.exception
+    at.radio(key="pie-by").set_value("종목별").run()
+    assert not at.exception
+
+
 def test_krx_gold_uses_auto_price_over_manual():
     seed()
     fakes.AUTO_PRICES["MANUAL:KRX 금현물"] = 180000
     at = run("portfolio")
     assert not at.exception
-    df = at.dataframe[0].value
+    df = holdings(at)
     row = df[df["종목"] == "KRX 금현물"].iloc[0]
     assert row["현재가"] == 180000 and row["시세"] == "시세(네이버)"
 
     fakes.AUTO_PRICES.clear()               # 네이버 실패 → 직접 입력값
     at = run("portfolio")
-    row = at.dataframe[0].value.set_index("종목").loc["KRX 금현물"]
+    row = holdings(at).set_index("종목").loc["KRX 금현물"]
     assert row["현재가"] == 150000 and row["시세"] == "직접 입력"
 
 

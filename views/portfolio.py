@@ -51,6 +51,35 @@ def won(v: float) -> str:
     return f"{'+' if v > 0 else '−' if v < 0 else ''}₩{abs(v):,.0f}"
 
 
+# 범주 색 (고정 순서, 순환하지 않음). 8번째부터는 ‘기타’로 묶는다.
+PIE_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]
+OTHER_COLOR = "#b9b8b2"
+
+
+def donut(parts: pd.DataFrame, total: float) -> go.Figure:
+    """구성 비율 원형 그래프. parts: label, value(원). 큰 순서대로 7개 + 기타."""
+    parts = parts[parts["value"] > 0].sort_values("value", ascending=False)
+    if len(parts) > len(PIE_COLORS):
+        head = parts.iloc[:len(PIE_COLORS) - 1]
+        parts = pd.concat([head, pd.DataFrame([{"label": "기타", "value": parts["value"].iloc[len(head):].sum()}])])
+    colors = PIE_COLORS[:len(parts)]
+    if len(parts) == len(PIE_COLORS) and parts["label"].iloc[-1] == "기타":
+        colors = PIE_COLORS[:len(parts) - 1] + [OTHER_COLOR]
+    fig = go.Figure(go.Pie(
+        labels=parts["label"], values=parts["value"], hole=0.58, sort=False, direction="clockwise",
+        marker=dict(colors=colors, line=dict(color="rgba(255,255,255,0.9)", width=2)),
+        textinfo="percent", textposition="inside", insidetextorientation="horizontal",
+        texttemplate="%{percent:.0%}", textfont=dict(color="white", size=13),
+        hovertemplate="%{label}<br>₩%{value:,.0f} · %{percent:.1%}<extra></extra>",
+    ))
+    fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=10), showlegend=True,
+                      legend=dict(orientation="v", x=1.0, y=0.5, font=dict(size=12)),
+                      annotations=[dict(text=f"총 평가<br><b>₩{total / 1e4:,.0f}만</b>", x=0.5, y=0.5,
+                                        showarrow=False, font=dict(size=15))],
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    return fig
+
+
 def fx_ticker(ccy: str) -> str:
     return "KRW=X" if ccy == "USD" else f"{ccy}KRW=X"
 
@@ -109,8 +138,47 @@ else:
 if ccys and not all(c in fx for c in ccys if c in set(tx["currency"]) | set(cash["currency"])):
     st.warning("환율을 받지 못한 통화가 있어 일부 원화 금액은 원가로 표시돼요.")
 
-tab_hold, tab_alloc, tab_tx, tab_real, tab_fx, tab_set = st.tabs(
-    ["보유 현황", "자산 배분·리밸런싱", "거래 입력·내역", "실현손익·배당", "달러 환전", "설정"])
+def pick_symbol(prefix: str):
+    """종목 고르기: 이미 있는 종목, 새 종목 검색, 티커 없는 자산 직접 등록. (티커, 통화, 새 종목 정보)"""
+    known = list(assets["symbol"])
+    pick = st.selectbox("종목", known + [NEW_SEARCH, NEW_MANUAL], key=f"{prefix}-symbol",
+                        format_func=lambda s: {NEW_SEARCH: "➕ 새 종목 검색", NEW_MANUAL: "➕ 티커 없는 자산 직접 등록"}.get(
+                            s, f"{name_of(s)} · {s.replace(MANUAL, '')}"))
+    new_asset = None
+    if pick == NEW_SEARCH:
+        q = st.text_input("종목 검색", placeholder="TIGER 미국S&P500, SPYM, 005930 …", key=f"{prefix}-search")
+        hits = symbols.search(q) if q else []
+        if q and not hits:
+            st.caption("결과가 없어요. 티커를 그대로 넣어 보세요 (예: 360750.KS, SPYM).")
+        if hits:
+            h = st.selectbox("검색 결과", hits, key=f"{prefix}-hits-{q}",
+                             format_func=lambda h: f"{h['name']} · {h['symbol']} ({h['market']})")
+            ac = st.selectbox("자산군", class_options, key=f"{prefix}-new-class")
+            new_asset = {"symbol": h["symbol"], "name": h["name"], "market": symbols.market_for(h["symbol"]),
+                         "currency": symbols.currency_for(h["symbol"]), "asset_class": ac}
+    elif pick == NEW_MANUAL:
+        c1, c2, c3 = st.columns([2, 1, 1])
+        mname = c1.text_input("이름", placeholder="KRX 금현물", key=f"{prefix}-manual-name")
+        mccy = c2.selectbox("통화", CURRENCIES, key=f"{prefix}-manual-ccy")
+        ac = c3.selectbox("자산군", class_options, key=f"{prefix}-manual-class")
+        st.caption("시세가 자동으로 안 잡히는 자산이에요. 현재가는 ‘설정 → 종목’에서 직접 넣어 주세요.")
+        if mname.strip():
+            new_asset = {"symbol": MANUAL + mname.strip(), "name": mname.strip(), "market": None,
+                         "currency": mccy, "asset_class": ac}
+    sym = new_asset["symbol"] if new_asset else (pick if pick in known else None)
+    ccy = new_asset["currency"] if new_asset else ((asset_info.get(sym) or {}).get("currency") or "KRW")
+    return sym, ccy, new_asset
+
+
+acc_ids = [None] + list(accounts["id"])
+
+
+def acc_label(i) -> str:
+    return "선택 안 함" if i is None else acc_name.get(i, str(i))
+
+
+tab_hold, tab_buy, tab_alloc, tab_tx, tab_real, tab_fx, tab_set = st.tabs(
+    ["보유 현황", "매수 입력", "자산 배분·리밸런싱", "매도·배당·거래 내역", "실현손익·배당", "달러 환전", "설정"])
 
 NUM = st.column_config.NumberColumn(format="localized")
 PCT = st.column_config.NumberColumn(format="%+.2f%%")
@@ -119,8 +187,24 @@ WEIGHT = st.column_config.NumberColumn(format="%.1f%%")
 # ── 보유 현황 ───────────────────────────────────────────────
 with tab_hold:
     held = valued[valued["quantity"] > 0].copy() if not valued.empty else valued
+    if total_value > 0:
+        g1, g2 = st.columns([3, 2])
+        by = g2.radio("구성 비율", ["자산군별", "종목별"], horizontal=True, key="pie-by")
+        if by == "자산군별":
+            parts = summary.loc[summary["value_krw"] > 0, ["asset_class", "value_krw"]].rename(
+                columns={"asset_class": "label", "value_krw": "value"})
+        else:
+            parts = pd.concat([
+                pd.DataFrame({"label": held["symbol"].map(name_of), "value": held["value_krw"]}),
+                pd.DataFrame({"label": cash["name"], "value": pf.cash_krw(cash, fx)}),
+            ]).groupby("label", as_index=False)["value"].sum().sort_values("value", ascending=False)
+        g1.plotly_chart(donut(parts, total_value), width="stretch", config={"displayModeBar": False}, key="pie")
+        with g2:
+            legend = parts.assign(비중=parts["value"] / parts["value"].sum() * 100).sort_values("value", ascending=False)
+            st.dataframe(pd.DataFrame({"": legend["label"], "금액": legend["value"].round(0), "비중": legend["비중"]}),
+                         hide_index=True, width="stretch", column_config={"금액": NUM, "비중": WEIGHT})
     if held.empty and cash.empty:
-        st.info("아직 보유 종목이 없어요. ‘거래 입력·내역’ 탭에서 매수 기록을 넣거나, ‘설정’에서 현금성 자산을 넣어 보세요.")
+        st.info("아직 보유 종목이 없어요. ‘매수 입력’ 탭에서 매수 기록을 넣거나, 아래 현금성 자산 표에 잔액을 넣어 보세요.")
     if not held.empty:
         order = {c: i for i, c in enumerate(class_options)}
         held["자산군"] = held["symbol"].map(lambda s: asset_class.get(s, pf.UNCLASSIFIED))
@@ -156,13 +240,29 @@ with tab_hold:
         missing = held.loc[held["price_missing"], "symbol"].map(name_of).tolist()
         if missing:
             st.warning(f"시세를 못 받아 원가로 표시한 종목: {', '.join(missing)}. ‘설정 → 종목’에서 현재가를 직접 넣을 수 있어요.")
-    if not cash.empty:
-        st.markdown("**현금성 자산**")
-        st.dataframe(pd.DataFrame({
-            "자산군": cash["asset_class"], "이름": cash["name"], "통화": cash["currency"],
-            "잔액": pd.to_numeric(cash["amount"]), "원화 환산": pf.cash_krw(cash, fx).round(0),
-            "메모": cash["memo"].fillna(""),
-        }), hide_index=True, width="stretch", column_config={"잔액": NUM, "원화 환산": NUM})
+    st.markdown("**현금성 자산** · 투자유보현금(RP·CD·예수금), 적금처럼 잔액만 관리하는 자산")
+    st.caption("표에서 바로 고치세요. 맨 아래 빈 줄에 쓰면 추가, 줄 왼쪽을 골라 휴지통을 누르면 삭제돼요. "
+               "다 고친 뒤 ‘현금성 자산 저장’을 누르면 포트폴리오(자산군 합계·비중)에 반영돼요.")
+    cash_view = cash_all.assign(account=cash_all["account_id"].map(acc_name))[
+        ["id", "name", "asset_class", "account", "currency", "amount", "memo"]]
+    c_edit = st.data_editor(
+        cash_view, num_rows="dynamic", hide_index=True, width="stretch", key="cash-editor",
+        column_config={
+            "id": None, "name": st.column_config.TextColumn("이름", required=True),
+            "asset_class": st.column_config.SelectboxColumn("자산군", options=class_options,
+                                                            default=pf.CASH_CLASS if pf.CASH_CLASS in class_options
+                                                            else None),
+            "account": st.column_config.SelectboxColumn("계좌", options=list(accounts["name"])),
+            "currency": st.column_config.SelectboxColumn("통화", options=CURRENCIES, default="KRW"),
+            "amount": st.column_config.NumberColumn("잔액", format="localized", min_value=0),
+            "memo": "메모",
+        })
+    if st.button("현금성 자산 저장", key="save-cash", type="primary"):
+        pf.save_cash(c_edit, cash_all, dict(zip(accounts["name"], accounts["id"])))
+        st.toast("현금성 자산을 저장했어요.")
+        st.rerun()
+    if sel_acc:
+        st.caption("계좌 필터와 상관없이 전체 현금성 자산을 편집해요.")
     notes = targets[(targets["status_note"].notna()) | (targets["strategy"].notna())]
     if not notes.empty:
         st.markdown("**자산군별 현황·전략 메모**")
@@ -172,6 +272,55 @@ with tab_hold:
                     st.markdown(f"**현황** · {t['status_note']}")
                 if pd.notna(t["strategy"]):
                     st.markdown(f"**전략** · {t['strategy']}")
+
+
+# ── 매수 입력 ─────────────────────────────────────────────
+with tab_buy:
+    st.subheader("매수 입력")
+    st.caption("저장하면 바로 보유 현황·자산 배분·이번 달 적립에 반영돼요.")
+    b_sym, b_ccy, b_new = pick_symbol("buy")
+    last_acc = None
+    if b_sym and not tx_all.empty:
+        prev = tx_all[(tx_all["symbol"] == b_sym) & tx_all["account_id"].notna()]
+        last_acc = int(prev["account_id"].iloc[-1]) if not prev.empty else None
+    with st.form("buy-form", clear_on_submit=True, border=True):
+        c1, c2 = st.columns(2)
+        b_date = c1.date_input("매수 날짜", today, key="buy-date")
+        b_acc = c2.selectbox("계좌", acc_ids, format_func=acc_label, key=f"buy-account-{b_sym}",
+                             index=acc_ids.index(last_acc) if last_acc in acc_ids else 0)
+        c1, c2, c3 = st.columns(3)
+        b_qty = c1.number_input("주식 수", min_value=0.0, step=1.0, format="%.8g", key="buy-qty")
+        b_price = c2.number_input(f"주식 가격 ({b_ccy})", min_value=0.0, step=1.0, format="%.4f", key="buy-price")
+        b_fx = None
+        if b_ccy != "KRW":
+            b_fx = c3.number_input(f"환율 (원/{b_ccy})", min_value=0.0, value=float(fx.get(b_ccy, 0.0)), step=1.0,
+                                   format="%.2f", key="buy-fx", help="원화 원가 계산용. 현재 환율이 미리 들어가 있어요.")
+        b_memo = st.text_input("메모", placeholder="정기 매수, 5% 하락 분할 …", key="buy-memo")
+        go_buy = st.form_submit_button("매수 저장", type="primary", disabled=not b_sym)
+    if go_buy:
+        if b_qty <= 0 or b_price <= 0:
+            st.error("주식 수와 주식 가격을 넣어 주세요.")
+        else:
+            if b_new:
+                pf.upsert_asset(**b_new)
+            pf.add_transaction({"trade_date": b_date, "account_id": b_acc, "symbol": b_sym, "side": "buy",
+                                "quantity": b_qty, "price": b_price, "currency": b_ccy, "fee": 0.0,
+                                "fx_rate": b_fx or None, "memo": b_memo or None})
+            st.session_state["buy-saved"] = (f"{b_new['name'] if b_new else name_of(b_sym)} {b_qty:g}주 × "
+                                             f"{b_price:,.4g} {b_ccy} 매수를 저장했어요.")
+            st.rerun()
+    if st.session_state.get("buy-saved"):
+        st.success(st.session_state.pop("buy-saved"))
+    recent = tx_all[tx_all["side"] == "buy"].tail(5).iloc[::-1] if not tx_all.empty else tx_all
+    if not recent.empty:
+        st.markdown("**최근 매수**")
+        st.dataframe(pd.DataFrame({
+            "날짜": recent["trade_date"], "종목": recent["symbol"].map(name_of), "주식 수": recent["quantity"],
+            "가격": recent["price"], "통화": recent["currency"], "계좌": recent["account_id"].map(acc_name).fillna(""),
+            "메모": recent["memo"].fillna(""),
+        }), hide_index=True, width="stretch", column_config={
+            "주식 수": st.column_config.NumberColumn(format="%.8g"), "가격": NUM})
+        st.caption("잘못 넣었으면 ‘매도·배당·거래 내역’ 탭의 ‘거래 삭제’에서 지울 수 있어요.")
 
 
 # ── 자산 배분·리밸런싱 ─────────────────────────────────────
@@ -297,41 +446,14 @@ with tab_alloc:
 
 # ── 거래 입력·내역 ─────────────────────────────────────────
 with tab_tx:
-    st.subheader("거래 입력")
-    known = list(assets["symbol"])
-    pick = st.selectbox("종목", known + [NEW_SEARCH, NEW_MANUAL], key="tx-symbol",
-                        format_func=lambda s: {NEW_SEARCH: "➕ 새 종목 검색", NEW_MANUAL: "➕ 티커 없는 자산 직접 등록"}.get(
-                            s, f"{name_of(s)} · {s.replace(MANUAL, '')}"))
-    new_asset = None
-    if pick == NEW_SEARCH:
-        q = st.text_input("종목 검색", placeholder="TIGER 미국S&P500, SPYM, 005930 …", key="tx-search")
-        hits = symbols.search(q) if q else []
-        if q and not hits:
-            st.caption("결과가 없어요. 티커를 그대로 넣어 보세요 (예: 360750.KS, SPYM).")
-        if hits:
-            h = st.selectbox("검색 결과", hits, key=f"tx-hits-{q}",
-                             format_func=lambda h: f"{h['name']} · {h['symbol']} ({h['market']})")
-            ac = st.selectbox("자산군", class_options, key="tx-new-class")
-            new_asset = {"symbol": h["symbol"], "name": h["name"], "market": symbols.market_for(h["symbol"]),
-                         "currency": symbols.currency_for(h["symbol"]), "asset_class": ac}
-    elif pick == NEW_MANUAL:
-        c1, c2, c3 = st.columns([2, 1, 1])
-        mname = c1.text_input("이름", placeholder="KRX 금현물", key="tx-manual-name")
-        mccy = c2.selectbox("통화", CURRENCIES, key="tx-manual-ccy")
-        ac = c3.selectbox("자산군", class_options, key="tx-manual-class")
-        st.caption("시세가 자동으로 안 잡히는 자산이에요. 현재가는 ‘설정 → 종목’에서 직접 넣어 주세요.")
-        if mname.strip():
-            new_asset = {"symbol": MANUAL + mname.strip(), "name": mname.strip(), "market": None,
-                         "currency": mccy, "asset_class": ac}
-    sym = new_asset["symbol"] if new_asset else (pick if pick in known else None)
-    ccy = new_asset["currency"] if new_asset else ((asset_info.get(sym) or {}).get("currency") or "KRW")
+    st.subheader("매도·배당 입력")
+    st.caption("매수는 ‘매수 입력’ 탭이 더 간단해요. 여기서는 매도·배당과 수수료까지 자세히 넣을 수 있어요.")
+    sym, ccy, new_asset = pick_symbol("tx")
 
-    side = st.radio("구분", list(pf.SIDES), format_func=pf.SIDES.get, horizontal=True, key="tx-side")
+    side = st.radio("구분", list(pf.SIDES), format_func=pf.SIDES.get, horizontal=True, key="tx-side", index=1)
     c1, c2 = st.columns(2)
     tdate = c1.date_input("날짜", today, key="tx-date")
-    acc_ids = [None] + list(accounts["id"])
-    account = c2.selectbox("계좌", acc_ids, format_func=lambda i: "선택 안 함" if i is None else acc_name[i],
-                           key="tx-account")
+    account = c2.selectbox("계좌", acc_ids, format_func=acc_label, key="tx-account")
     c1, c2, c3, c4 = st.columns(4)
     if side == "dividend":
         qty = 0.0
@@ -558,22 +680,6 @@ with tab_set:
                 if r["asset_class"] != b["asset_class"] or mp != bp:
                     pf.update_asset(r["symbol"], r["asset_class"], mp)
             st.rerun()
-
-    st.subheader("현금성 자산")
-    st.caption("투자유보현금, RP, CD, 적금처럼 티커 없이 잔액만 관리하는 자산이에요.")
-    c_edit = st.data_editor(
-        cash_all[["id", "name", "asset_class", "currency", "amount", "memo"]], num_rows="dynamic", hide_index=True,
-        width="stretch", key="cash-editor",
-        column_config={
-            "id": None, "name": st.column_config.TextColumn("이름", required=True),
-            "asset_class": st.column_config.SelectboxColumn("자산군", options=class_options),
-            "currency": st.column_config.SelectboxColumn("통화", options=CURRENCIES, default="KRW"),
-            "amount": st.column_config.NumberColumn("잔액", format="localized"),
-            "memo": "메모",
-        })
-    if st.button("현금성 자산 저장", key="save-cash"):
-        pf.save_cash(c_edit, cash_all)
-        st.rerun()
 
     st.subheader("계좌")
     if not accounts.empty:

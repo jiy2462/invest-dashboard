@@ -108,16 +108,26 @@ def list_cash() -> pd.DataFrame:
                         columns=["id", "name", "asset_class", "account_id", "currency", "amount", "memo", "updated_at"])
 
 
-def save_cash(edited: pd.DataFrame, original: pd.DataFrame) -> None:
+CASH_CLASS = "투자유보현금"
+
+
+def save_cash(edited: pd.DataFrame, original: pd.DataFrame, account_ids: dict[str, int] | None = None,
+              default_class: str = CASH_CLASS) -> None:
+    """현금성 자산 표 편집 결과 저장: 남은 행은 수정·추가, 지운 행은 삭제.
+
+    account 열(계좌 이름)이 있으면 account_ids로 id를 찾아 넣는다. 자산군이 비면 default_class.
+    """
     db = get_client()
     keep = set()
     for _, r in edited.iterrows():
         name = _txt(r.get("name"))
         if not name:
             continue
-        payload = {"name": name, "asset_class": _txt(r.get("asset_class")) or UNCLASSIFIED,
+        payload = {"name": name, "asset_class": _txt(r.get("asset_class")) or default_class,
                    "currency": _txt(r.get("currency")) or "KRW", "amount": _num(r.get("amount")),
                    "memo": _txt(r.get("memo")), "updated_at": datetime.now().isoformat()}
+        if "account" in edited.columns:
+            payload["account_id"] = (account_ids or {}).get(_txt(r.get("account")) or "")
         rid = r.get("id")
         if rid is not None and not pd.isna(rid):
             keep.add(int(rid))
