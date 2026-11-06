@@ -39,7 +39,7 @@ def test_naver_first_then_ecos(monkeypatch):
     monkeypatch.setattr(market, "ecos_key", lambda: "KEY")
     monkeypatch.setattr(market.kr_rates, "fetch", lambda sym: s)
     monkeypatch.setattr(market, "fetch_ecos", lambda sym, key: (_ for _ in ()).throw(AssertionError("ECOS 호출 안 돼야 함")))
-    monkeypatch.setattr(market, "fetch_yf_closes", lambda syms: pd.DataFrame())
+    monkeypatch.setattr(market, "fetch_yf_ohlc", lambda syms: {})
     out, errors = market.load_series([{"symbol": "ecos:CD91", "source": "ecos"}])
     assert out["ecos:CD91"].iloc[-1] == 2.59 and not errors
 
@@ -54,7 +54,7 @@ def test_falls_back_to_ecos_and_reports_both(monkeypatch):
     monkeypatch.setattr(market, "ecos_key", lambda: "KEY")
     monkeypatch.setattr(market.kr_rates, "fetch", fail)
     monkeypatch.setattr(market, "fetch_ecos", ecos_fail)
-    monkeypatch.setattr(market, "fetch_yf_closes", lambda syms: pd.DataFrame())
+    monkeypatch.setattr(market, "fetch_yf_ohlc", lambda syms: {})
     out, errors = market.load_series([{"symbol": "ecos:KR10Y", "source": "ecos"}])
     assert not out
     assert "네이버" in errors["ecos:KR10Y"] and "ECOS" in errors["ecos:KR10Y"]

@@ -1,6 +1,6 @@
 import streamlit as st
 
-from lib.auth import require_password
+from lib.auth import logout, require_password
 
 st.set_page_config(page_title="투자 대시보드", page_icon="📈", layout="wide")
 
@@ -18,7 +18,6 @@ nav = st.navigation(pages)
 
 with st.sidebar:
     if st.button("로그아웃"):
-        st.session_state.clear()
-        st.rerun()
+        logout()
 
 nav.run()

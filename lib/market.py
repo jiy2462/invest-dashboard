@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import re
-from datetime import date, timedelta
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import requests
 import streamlit as st
 import yfinance as yf
 
-from lib import kr_rates
+from lib import kr_rates, market_hours
 
 # ECOS 시장금리(일별) 통계표 817Y002의 항목 코드
 ECOS_SERIES = {
@@ -18,7 +20,9 @@ ECOS_SERIES = {
     "ecos:CD91": ("817Y002", "010502000"),   # CD(91일)
 }
 
-LOOKBACK_DAYS = 120  # 90일 미니 차트 + 휴장일 여유
+LOOKBACK_DAYS = 120  # 관심종목·포트폴리오용 최근 종가
+HISTORY_DAYS = 450  # 오늘의 시장: 90일 캔들 + 200일선 계산에 필요한 과거 (휴장일 여유 포함)
+OHLC = ["Open", "High", "Low", "Close"]
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -42,6 +46,48 @@ def fetch_yf_closes(symbols: tuple[str, ...]) -> pd.DataFrame:
         closes = closes.to_frame(name=symbols[0])
     closes.index = pd.to_datetime(closes.index).tz_localize(None)
     return closes
+
+
+def fetch_yf_ohlc(symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
+    """여러 티커의 일봉(시가·고가·저가·종가)을 한 번의 요청으로 받는다. {티커: DataFrame}."""
+    if not symbols:
+        return {}
+    raw = yf.download(
+        list(symbols),
+        period=f"{HISTORY_DAYS}d",
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        group_by="ticker",
+        threads=True,
+        timeout=10,
+    )
+    out: dict[str, pd.DataFrame] = {}
+    if raw is None or raw.empty:
+        return out
+    for sym in symbols:
+        try:
+            df = raw[sym] if isinstance(raw.columns, pd.MultiIndex) else raw
+        except KeyError:
+            continue
+        df = clean_ohlc(df)
+        if not df.empty:
+            out[sym] = df
+    return out
+
+
+def clean_ohlc(df: pd.DataFrame) -> pd.DataFrame:
+    """종가 없는 날은 빼고, 시가·고가·저가가 비면 종가로 채운다. 종가만 있는 시계열도 받는다."""
+    if isinstance(df, pd.Series):
+        df = df.to_frame("Close")
+    df = df[[c for c in OHLC if c in df.columns]].dropna(subset=["Close"]).copy()
+    for c in OHLC:
+        if c not in df.columns:
+            df[c] = df["Close"]
+        df[c] = df[c].fillna(df["Close"])
+    idx = pd.to_datetime(df.index)
+    df.index = idx.tz_localize(None) if idx.tz is not None else idx
+    return df[OHLC].sort_index()
 
 
 class EcosError(Exception):
@@ -94,49 +140,125 @@ def ecos_key() -> str:
         return ""
 
 
-def load_series(settings: list[dict]) -> tuple[dict[str, pd.Series], dict[str, str]]:
-    """지표 설정 목록에 대해 ({symbol: 시계열}, {symbol: 못 받은 이유})를 돌려준다."""
-    out: dict[str, pd.Series] = {}
-    errors: dict[str, str] = {}
-    yf_symbols = tuple(sorted({s["symbol"] for s in settings if s["source"] == "yfinance"}))
-    try:
-        closes = fetch_yf_closes(yf_symbols)
-    except Exception:
-        closes = pd.DataFrame()
-    for sym in yf_symbols:
-        if sym in closes.columns:
-            s = closes[sym].dropna()
-            if not s.empty:
-                out[sym] = s
-                continue
-        errors[sym] = f"`{sym}` 시세를 못 받았어요"
-
-    key = ecos_key()
-    for s in settings:
-        if s["source"] != "ecos":
-            continue
-        sym = s["symbol"]
-        if sym not in ECOS_SERIES and sym not in kr_rates.SUPPORTED:
-            errors[sym] = f"`{sym}`은 아직 지원하지 않는 한국 금리 지표예요"
-            continue
-        reasons = []
-        # 1) Investing.com → 네이버 금융 (해외 서버에서도 열리는 곳)
+def _kr_rate(sym: str, key: str) -> tuple[pd.Series | None, str | None]:
+    """한국 금리 하나: Investing.com → 네이버 금융 → (키가 있으면) 한국은행 ECOS 순서."""
+    if sym not in ECOS_SERIES and sym not in kr_rates.SUPPORTED:
+        return None, f"`{sym}`은 아직 지원하지 않는 한국 금리 지표예요"
+    reasons = []
+    try:  # 1) Investing.com → 네이버 금융 (해외 서버에서도 열리는 곳)
+        return kr_rates.fetch(sym), None
+    except kr_rates.KrRateError as e:
+        reasons.append(str(e))
+    except Exception as e:
+        reasons.append(f"네이버 {type(e).__name__}")
+    if key and sym in ECOS_SERIES:  # 2) 한국은행 ECOS
         try:
-            out[sym] = kr_rates.fetch(sym)
-            continue
-        except kr_rates.KrRateError as e:
+            return fetch_ecos(sym, key), None
+        except EcosError as e:
             reasons.append(str(e))
-        # 2) 한국은행 ECOS (키가 있을 때)
-        if key and sym in ECOS_SERIES:
-            try:
-                out[sym] = fetch_ecos(sym, key)
-                continue
-            except EcosError as e:
-                reasons.append(str(e))
-        elif not key:
-            reasons.append("ECOS_API_KEY 없음")
-        errors[sym] = "못 받았어요: " + " / ".join(reasons)
+    elif not key:
+        reasons.append("ECOS_API_KEY 없음")
+    return None, "못 받았어요: " + " / ".join(reasons)
+
+
+def load_ohlc_uncached(yf_symbols: tuple[str, ...], kr_symbols: tuple[str, ...],
+                       key: str) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+    """야후(한 번에 묶어서)와 한국 금리(지표마다)를 동시에 받는다."""
+    out: dict[str, pd.DataFrame] = {}
+    errors: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=1 + max(1, len(kr_symbols))) as pool:
+        yf_job = pool.submit(fetch_yf_ohlc, yf_symbols)
+        kr_jobs = {sym: pool.submit(_kr_rate, sym, key) for sym in kr_symbols}
+        try:
+            out.update(yf_job.result())
+        except Exception:
+            pass
+        for sym, job in kr_jobs.items():
+            series, err = job.result()
+            if series is not None and not series.empty:
+                out[sym] = clean_ohlc(series)
+            else:
+                errors[sym] = err or f"`{sym}` 시세를 못 받았어요"
+    for sym in yf_symbols:
+        if sym not in out:
+            errors[sym] = f"`{sym}` 시세를 못 받았어요"
     return out, errors
+
+
+LIVE_TTL = timedelta(minutes=5)   # 열린 장: 5분마다 새로
+RETRY_TTL = timedelta(minutes=5)  # 못 받은 지표: 5분 뒤 다시 시도
+
+
+@st.cache_resource
+def _store() -> dict:
+    """지표별 시세 저장소 (서버 메모리, 모든 접속이 같이 씀). {symbol: {"df", "err", "at"}}"""
+    return {"data": {}, "lock": threading.Lock()}
+
+
+def clear_cache() -> None:
+    st_ = _store()
+    with st_["lock"]:
+        st_["data"].clear()
+
+
+def is_fresh(symbol: str, entry: dict | None, now: datetime) -> bool:
+    """다시 받을 필요가 없는가.
+
+    - 못 받은 지표: 5분 지나면 다시 시도
+    - 열린 장(마감 직후 20분 포함): 5분 지나면 다시
+    - 닫힌 장: 마감 뒤에 한 번 받았으면 다음 장이 열릴 때까지 그대로
+    """
+    if not entry:
+        return False
+    if entry.get("retry_at") and now < entry["retry_at"]:
+        return True
+    age = now - entry["at"]
+    if entry["df"] is None:
+        return age < RETRY_TTL
+    if market_hours.is_live(symbol, now):
+        return age < LIVE_TTL
+    closed = market_hours.last_close(market_hours.market_of(symbol), now)
+    return closed is None or entry["at"] >= closed + market_hours.GRACE
+
+
+def load_ohlc(settings: list[dict], cached: bool = True,
+              now: datetime | None = None) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
+    """지표 설정 목록에 대해 ({symbol: 일봉 DataFrame}, {symbol: 못 받은 이유})를 돌려준다.
+
+    장이 닫힌 지표는 저장해 둔 값을 쓰고, 다시 받아야 하는 지표만 한 번에 묶어 받는다.
+    한국 금리처럼 종가만 있는 지표는 시가·고가·저가를 종가로 채운다.
+    """
+    yf_symbols = tuple(sorted({s["symbol"] for s in settings if s["source"] == "yfinance"}))
+    kr_symbols = tuple(sorted({s["symbol"] for s in settings if s["source"] == "ecos"}))
+    if not cached:
+        return load_ohlc_uncached(yf_symbols, kr_symbols, ecos_key() if kr_symbols else "")
+
+    now = now or datetime.now(timezone.utc)
+    store = _store()
+    with store["lock"]:
+        data = store["data"]
+        stale_yf = tuple(s for s in yf_symbols if not is_fresh(s, data.get(s), now))
+        stale_kr = tuple(s for s in kr_symbols if not is_fresh(s, data.get(s), now))
+        if stale_yf or stale_kr:
+            got, errs = load_ohlc_uncached(stale_yf, stale_kr, ecos_key() if stale_kr else "")
+            for sym in stale_yf + stale_kr:
+                old = data.get(sym)
+                if sym in got:
+                    data[sym] = {"df": got[sym], "err": None, "at": now}
+                elif old and old["df"] is not None:  # 이번에 실패하면 예전 값을 계속 보여 준다
+                    data[sym] = {**old, "retry_at": now + RETRY_TTL}
+                else:
+                    data[sym] = {"df": None, "err": errs.get(sym), "at": now}
+        out = {s: data[s]["df"] for s in yf_symbols + kr_symbols if data[s]["df"] is not None}
+        errors = {s: data[s]["err"] or f"`{s}` 시세를 못 받았어요"
+                  for s in yf_symbols + kr_symbols if data[s]["df"] is None}
+    return out, errors
+
+
+def load_series(settings: list[dict]) -> tuple[dict[str, pd.Series], dict[str, str]]:
+    """종가 시계열만 필요할 때 (캐시 없이 바로)."""
+    data, errors = load_ohlc(settings, cached=False)
+    return {k: v["Close"] for k, v in data.items()}, errors
 
 
 def summarize(series: pd.Series, is_rate: bool) -> dict:

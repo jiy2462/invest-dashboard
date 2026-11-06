@@ -20,6 +20,10 @@ streamlit run app.py
 - 저장소 연결 → Main file: `app.py`
 - App settings → Secrets 에 `.streamlit/secrets.toml.example` 의 키를 실제 값으로 입력
 
+## 로그인
+`APP_PASSWORD` 하나로 로그인. 로그인하면 30일짜리 서명 토큰을 쿠키와 주소(`?t=...`)에 둬서 새로고침해도 유지된다.
+`?t=`가 붙은 주소를 남에게 주면 그 사람도 들어올 수 있으니 공유하지 말 것. 비밀번호를 바꾸면 기존 로그인은 모두 풀린다.
+
 ## DB
 Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL을 번호 순서대로 적용한다 (`001_init.sql` → `002_portfolio.sql` → `003_fx_exchanges.sql`).
 

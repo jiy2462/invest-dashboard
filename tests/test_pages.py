@@ -56,3 +56,18 @@ def test_english_search():
     at = run("watchlist")
     at.text_input[0].set_value("apple").run()
     assert any("AAPL" in o for o in at.selectbox[0].options)
+
+
+def test_market_mini_candles_with_moving_averages():
+    at = run("market")
+    assert not at.exception
+    charts = [c for c in at.get("plotly_chart")]
+    assert charts, "지표 카드 차트가 없어요"
+    import json
+    fig = json.loads(charts[0].proto.spec)
+    kinds = [t["type"] for t in fig["data"]]
+    names = [t.get("name") for t in fig["data"]]
+    assert kinds[0] == "candlestick"
+    assert "50일선" in names and "200일선" in names
+    md = " ".join(m.value for m in at.markdown)
+    assert "200일 " in md
