@@ -22,3 +22,10 @@ streamlit run app.py
 
 ## DB
 Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL 순서대로 적용되어 있음.
+
+## 테스트 (네트워크 없이)
+```bash
+pip install pytest
+python -m pytest tests
+```
+`tests/fakes.py`가 Supabase와 시세를 가짜로 바꿔서 화면을 Streamlit AppTest로 실행한다.
