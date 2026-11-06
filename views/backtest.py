@@ -95,6 +95,12 @@ defaults = ["주식 60 / 장기채 30 / 금 10", MY if my_weights else "올웨�
 st.session_state.setdefault("bt_start", min_start)
 st.session_state.setdefault("bt_end", today)
 st.session_state.setdefault("bt_rebal", "yearly")
+st.session_state.setdefault("bt_base", "KRW")
+st.session_state.setdefault("bt_bench", "US_STOCK")
+st.session_state.setdefault("bt_n", 2)
+for _ccy, _init in (("KRW", 10_000_000.0), ("USD", 10_000.0)):
+    st.session_state.setdefault(f"bt_init_{_ccy}", _init)
+    st.session_state.setdefault(f"bt_monthly_{_ccy}", 0.0)
 for i in range(MAX_SLOTS):
     if f"bt_rows{i}" not in st.session_state:
         st.session_state[f"bt_pick{i}"] = defaults[i]
@@ -106,6 +112,73 @@ for i in range(MAX_SLOTS):
         st.session_state[f"bt_name{i}"] = st.session_state.get(f"_bt_name{i}", "")
     if st.session_state[f"bt_pick{i}"] not in choices:
         st.session_state[f"bt_pick{i}"] = defaults[i] if defaults[i] in choices else choices[0]
+
+# ── 저장한 백테스트 ──────────────────────────────────────────
+def open_saved(run_id: int) -> None:
+    """저장한 백테스트의 결과를 보여 주고, 그때 고른 옵션을 입력 칸에 되돌려 놓는다."""
+    try:
+        loaded, row = bt.load_run(run_id)
+    except Exception as e:
+        st.session_state["bt_load_error"] = str(e)
+        return
+    st.session_state["bt_run"] = loaded
+    st.session_state["bt_saved_meta"] = {"name": row["name"], "created_at": row.get("created_at"), "loaded": True}
+    cfg = loaded.settings
+    if cfg.get("start"):
+        st.session_state["bt_start"] = max(date.fromisoformat(cfg["start"]), min_start)
+    if cfg.get("end"):
+        st.session_state["bt_end"] = min(date.fromisoformat(cfg["end"]), today)
+    if cfg.get("base") in ("KRW", "USD"):
+        st.session_state["bt_base"] = cfg["base"]
+        st.session_state[f"bt_init_{cfg['base']}"] = float(cfg.get("initial") or 0)
+        st.session_state[f"bt_monthly_{cfg['base']}"] = float(cfg.get("monthly") or 0)
+    if cfg.get("rebalance") in bt.REBALANCE:
+        st.session_state["bt_rebal"] = cfg["rebalance"]
+    if cfg.get("benchmark") in ["없음"] + list(bt.CATALOG):
+        st.session_state["bt_bench"] = cfg["benchmark"]
+    ports = (cfg.get("portfolios") or [])[:MAX_SLOTS]
+    if ports:
+        st.session_state["bt_n"] = len(ports)
+    for i, p in enumerate(ports):
+        st.session_state[f"bt_rows{i}"] = rows_of(p["weights"])
+        st.session_state[f"bt_name{i}"] = p["name"]
+        st.session_state[f"bt_ver{i}"] = st.session_state.get(f"bt_ver{i}", 0) + 1
+
+
+def settings_text(cfg: dict) -> str:
+    if not cfg:
+        return ""
+    ccy = cfg.get("base", "KRW")
+    sym = "₩" if ccy == "KRW" else "$"
+    bench_key = cfg.get("benchmark") or "없음"
+    bench_label = bt.CATALOG[bench_key].label if bench_key in bt.CATALOG else "없음"
+    return (f"{cfg.get('start')} ~ {cfg.get('end')} · 계산 통화 {ccy} · 초기 {sym}{float(cfg.get('initial') or 0):,.0f}"
+            f" · 월 적립 {sym}{float(cfg.get('monthly') or 0):,.0f} · 리밸런싱 {bt.REBALANCE.get(cfg.get('rebalance'), '–')}"
+            f" · 비교 기준 {bench_label}")
+
+
+try:
+    saved_runs = bt.list_runs()
+except Exception:
+    saved_runs = None
+if st.session_state.get("bt_load_error"):
+    st.error(f"저장한 백테스트를 불러오지 못했어요: {st.session_state.pop('bt_load_error')}")
+if saved_runs:
+    with st.expander(f"저장한 백테스트 ({len(saved_runs)}개)"):
+        for r in reversed(saved_runs):
+            a, b, c = st.columns([6, 1, 1])
+            when = str(r.get("created_at") or "")[:10]
+            names = " / ".join(p["name"] for p in (r["settings"] or {}).get("portfolios", []))
+            a.markdown(f"**{r['name']}** · {when}  \n{names}")
+            a.caption(settings_text(r["settings"] or {}))
+            b.button("보기", key=f"bt_open{r['id']}", on_click=open_saved, args=(r["id"],))
+            if c.button("삭제", key=f"bt_rdel{r['id']}"):
+                bt.delete_run(r["id"])
+                meta = st.session_state.get("bt_saved_meta")
+                if meta and meta.get("name") == r["name"]:
+                    st.session_state.pop("bt_saved_meta", None)
+                st.toast(f"‘{r['name']}’ 삭제했어요.")
+                st.rerun()
 
 # ── 설정 ───────────────────────────────────────────────────
 with st.container(border=True):
@@ -120,14 +193,14 @@ with st.container(border=True):
     rebalance = c4.selectbox("리밸런싱", list(bt.REBALANCE), format_func=bt.REBALANCE.get, key="bt_rebal")
     d1, d2, d3, d4 = st.columns(4)
     unit = "원" if base == "KRW" else "달러"
-    initial = d1.number_input(f"초기 금액({unit})", min_value=0.0, value=10_000_000.0 if base == "KRW" else 10_000.0,
+    initial = d1.number_input(f"초기 금액({unit})", min_value=0.0,
                               step=1_000_000.0 if base == "KRW" else 1_000.0, format="%.0f", key=f"bt_init_{base}")
-    monthly = d2.number_input(f"월 적립금({unit})", min_value=0.0, value=0.0,
+    monthly = d2.number_input(f"월 적립금({unit})", min_value=0.0,
                               step=100_000.0 if base == "KRW" else 100.0, format="%.0f", key=f"bt_monthly_{base}")
     bench_opts = ["없음"] + list(bt.CATALOG)
-    bench = d3.selectbox("비교 기준", bench_opts, index=1, key="bt_bench",
+    bench = d3.selectbox("비교 기준", bench_opts, key="bt_bench",
                          format_func=lambda k: k if k == "없음" else bt.CATALOG[k].label)
-    n_slots = d4.radio("비교할 조합 수", [1, 2, 3], index=1, horizontal=True, key="bt_n")
+    n_slots = d4.radio("비교할 조합 수", [1, 2, 3], horizontal=True, key="bt_n")
 
 if start >= end:
     st.error("시작일이 종료일보다 앞이어야 해요.")
@@ -198,8 +271,12 @@ if st.button("백테스트 실행", type="primary", disabled=not portfolios):
         except Exception as e:
             st.error(f"시세를 받지 못했어요: {e}")
             st.stop()
-        st.session_state["bt_run"] = bt.run_backtest(runs, start, end, initial, monthly, rebalance, base, hist)
-        st.session_state["bt_has_bench"] = bench != "없음"
+        result = bt.run_backtest(runs, start, end, initial, monthly, rebalance, base, hist)
+        result.settings = {"start": str(start), "end": str(end), "base": base, "rebalance": rebalance,
+                           "initial": float(initial), "monthly": float(monthly), "benchmark": bench,
+                           "portfolios": [{"name": p.name, "weights": p.weights} for p in portfolios]}
+        st.session_state["bt_run"] = result
+        st.session_state.pop("bt_saved_meta", None)
 
 run: bt.Run | None = st.session_state.get("bt_run")
 if run is None:
@@ -234,8 +311,33 @@ def spell_text(sp: dict | None, none: str) -> str:
 other_ccy = "USD" if run.base == "KRW" else "KRW"
 st.divider()
 st.subheader(f"결과 · {run.start.date()} ~ {run.end.date()} ({(run.end - run.start).days / 365.25:.1f}년)")
+meta = st.session_state.get("bt_saved_meta")
+if meta:
+    st.caption(f"📁 저장한 결과 ‘{meta['name']}’ ({str(meta.get('created_at') or '')[:10]} 저장)."
+               + (" 곡선은 주 단위로 저장돼서 그래프가 조금 덜 촘촘해요. 지표는 저장할 때 계산한 값 그대로예요."
+                  if meta.get("loaded") else ""))
+if run.settings:
+    st.caption("설정: " + settings_text(run.settings))
 for n in run.notes:
     st.info(n)
+
+if not meta and run.settings:
+    with st.form("bt_save_run", border=False):
+        default_name = f"{date.today():%Y-%m-%d} · " + " vs ".join(p["name"] for p in run.settings["portfolios"])
+        s1, s2 = st.columns([4, 1])
+        run_name = s1.text_input("저장 이름", value=default_name, label_visibility="collapsed")
+        if s2.form_submit_button("이 결과 저장", width="stretch"):
+            if saved_runs is None:
+                st.error("DB에 연결하지 못해 저장할 수 없어요.")
+            else:
+                try:
+                    bt.save_run(run_name.strip() or default_name, run)
+                    st.session_state["bt_saved_meta"] = {"name": run_name.strip() or default_name,
+                                                         "created_at": str(date.today())}
+                    st.toast("결과를 저장했어요. 위 ‘저장한 백테스트’에서 다시 볼 수 있어요.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"저장하지 못했어요. Supabase에 `supabase/004_backtest_runs.sql`이 적용됐는지 확인해 주세요. ({e})")
 
 has_monthly = any(r.sim["invested"].iloc[-1] > r.sim["invested"].iloc[0] for r in run.results)
 rows = []

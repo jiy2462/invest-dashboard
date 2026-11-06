@@ -367,6 +367,7 @@ class Run:
     sources: pd.DataFrame        # 자산군별 사용한 데이터 구간
     notes: list[str]
     fx: pd.Series
+    settings: dict = field(default_factory=dict)   # 화면에서 고른 옵션 (저장·불러오기용)
 
 
 def needed_tickers(keys: set[str]) -> tuple[str, ...]:
@@ -487,3 +488,89 @@ def save_preset(name: str, weights: dict[str, float], settings: dict) -> None:
 
 def delete_preset(preset_id: int) -> None:
     get_client().table("backtest_presets").delete().eq("id", preset_id).execute()
+
+
+# ── 저장한 백테스트 (설정 + 결과, Supabase backtest_runs) ─────
+
+SAVE_FREQ = "W-FRI"   # 곡선은 주 단위로 줄여 저장한다 (30년 ≈ 1,600점). 지표는 매일 기준으로 계산한 값을 그대로 저장
+
+
+def _enc(v):
+    """JSON으로 저장할 수 있게 날짜·numpy 값을 바꾼다."""
+    if isinstance(v, pd.Timestamp):
+        return {"__ts": v.isoformat()}
+    if isinstance(v, dict):
+        return {k: _enc(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_enc(x) for x in v]
+    if isinstance(v, (np.floating, float)):
+        return None if not np.isfinite(v) else float(v)
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.bool_):
+        return bool(v)
+    return v
+
+
+def _dec(v):
+    if isinstance(v, dict):
+        if set(v) == {"__ts"}:
+            return pd.Timestamp(v["__ts"])
+        return {k: _dec(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_dec(x) for x in v]
+    return v
+
+
+def _thin(df: pd.DataFrame) -> pd.DataFrame:
+    """주 단위로 줄이되 첫날·마지막 날은 남긴다."""
+    weekly = df.resample(SAVE_FREQ).last().dropna(how="all")
+    weekly.index = [df.index[df.index <= d][-1] for d in weekly.index]
+    return pd.concat([df.iloc[:1], weekly, df.iloc[-1:]]).pipe(lambda x: x[~x.index.duplicated(keep="last")])
+
+
+def run_to_json(run: Run) -> dict:
+    results = []
+    for r in run.results:
+        frame = _thin(r.sim.assign(other=r.other))
+        results.append({
+            "name": r.name, "weights": r.weights, "stats": _enc(r.stats),
+            "dates": [d.strftime("%Y-%m-%d") for d in frame.index],
+            **{c: [_enc(x) for x in frame[c]] for c in ("value", "invested", "nav", "other")},
+        })
+    src = run.sources.copy()
+    for c in ("시작", "끝"):
+        src[c] = src[c].astype(str)
+    return {"base": run.base, "start": run.start.isoformat(), "end": run.end.isoformat(),
+            "notes": run.notes, "sources": src.to_dict("records"), "results": results}
+
+
+def run_from_json(d: dict, settings: dict | None = None) -> Run:
+    results = []
+    for r in d["results"]:
+        idx = pd.to_datetime(r["dates"])
+        sim = pd.DataFrame({c: pd.Series(r[c], dtype=float).to_numpy() for c in ("value", "invested", "nav")}, index=idx)
+        other = pd.Series(pd.Series(r["other"], dtype=float).to_numpy(), index=idx)
+        results.append(Result(r["name"], sim, _dec(r["stats"]), r["weights"], other))
+    sources = pd.DataFrame(d.get("sources") or [], columns=["자산", "티커", "설명", "시작", "끝"])
+    return Run(results, d["base"], pd.Timestamp(d["start"]), pd.Timestamp(d["end"]), sources,
+               list(d.get("notes") or []), pd.Series(dtype=float), settings or {})
+
+
+def list_runs() -> list[dict]:
+    """저장한 백테스트 목록 (결과 본문 없이)."""
+    return get_client().table("backtest_runs").select("id,name,settings,created_at").order("id").execute().data
+
+
+def load_run(run_id: int) -> tuple[Run, dict]:
+    row = get_client().table("backtest_runs").select("*").eq("id", run_id).execute().data[0]
+    return run_from_json(row["results"], row["settings"]), row
+
+
+def save_run(name: str, run: Run) -> None:
+    get_client().table("backtest_runs").insert(
+        {"name": name, "settings": _enc(run.settings), "results": run_to_json(run)}).execute()
+
+
+def delete_run(run_id: int) -> None:
+    get_client().table("backtest_runs").delete().eq("id", run_id).execute()

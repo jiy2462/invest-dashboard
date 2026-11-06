@@ -24,7 +24,7 @@ def reset_db() -> None:
         for i, (s, n, g) in enumerate(rows)
     ]
     for t in ("assets", "watchlist", "chart_drawings", "accounts", "transactions", "target_allocation",
-              "cash_balances", "portfolio_snapshots", "app_settings", "fx_exchanges", "backtest_presets"):
+              "cash_balances", "portfolio_snapshots", "app_settings", "fx_exchanges", "backtest_presets", "backtest_runs"):
         TABLES[t] = []
 
 

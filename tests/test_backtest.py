@@ -158,3 +158,45 @@ def test_semiannual_rebalance_happens_in_january_and_july():
     assert q["value"].iloc[-1] < h["value"].iloc[-1] < y["value"].iloc[-1]   # 오르는 자산을 덜어내는 횟수만큼
     assert bt._period_key(pd.Timestamp("2020-06-30"), "semiannual") != bt._period_key(pd.Timestamp("2020-07-01"), "semiannual")
     assert "semiannual" in bt.REBALANCE
+
+
+def test_run_roundtrip_through_json():
+    hist = fakes.fake_history(bt.needed_tickers({"US_STOCK", "US_ITB"}))
+    res = bt.run_backtest([bt.Portfolio("60/40", {"US_STOCK": 60, "US_ITB": 40})], date(2000, 1, 3), date(2026, 11, 5),
+                          1000, 10, "semiannual", "USD", hist)
+    res.settings = {"start": "2000-01-03", "end": "2026-11-05", "base": "USD"}
+    import json
+    blob = json.loads(json.dumps(bt.run_to_json(res)))          # DB에 들어갈 수 있는 JSON이어야 함
+    back = bt.run_from_json(blob, res.settings)
+    a, b = res.results[0], back.results[0]
+    assert b.stats["cagr"] == pytest.approx(a.stats["cagr"]) and b.stats["mdd_date"] == a.stats["mdd_date"]
+    assert b.stats["loss_recovery"] == a.stats["loss_recovery"]
+    assert b.sim.index[0] == a.sim.index[0] and b.sim.index[-1] == a.sim.index[-1]
+    assert b.sim["value"].iloc[-1] == pytest.approx(a.sim["value"].iloc[-1])
+    assert len(b.sim) < len(a.sim) / 4                            # 주 단위로 줄여 저장
+    assert list(back.sources["티커"]) == list(res.sources["티커"]) and back.settings["base"] == "USD"
+
+
+def test_save_view_and_delete_backtest_run():
+    at = run("backtest")
+    [b for b in at.button if b.label == "백테스트 실행"][0].click().run()
+    assert not at.exception
+    [b for b in at.button if b.label == "이 결과 저장"][0].click().run()
+    assert not at.exception
+    rows = fakes.TABLES["backtest_runs"]
+    assert len(rows) == 1 and rows[0]["settings"]["rebalance"] == "yearly"
+    assert [p["name"] for p in rows[0]["settings"]["portfolios"]][0] == "주식 60 / 장기채 30 / 금 10"
+
+    # 다른 설정으로 바꾼 뒤 저장한 결과를 열면 옵션과 결과가 되돌아온다
+    at.selectbox(key="bt_rebal").set_value("quarterly").run()
+    at.session_state["bt_run"] = None
+    at.run()
+    [b for b in at.button if b.label == "보기"][0].click().run()
+    assert not at.exception
+    assert at.session_state.bt_rebal == "yearly"
+    assert at.session_state.bt_run.results[0].name == "주식 60 / 장기채 30 / 금 10"
+    assert any("저장한 결과" in c.value for c in at.caption)
+
+    [b for b in at.button if b.label == "삭제" and str(b.key).startswith("bt_rdel")][0].click().run()
+    assert not at.exception
+    assert fakes.TABLES["backtest_runs"] == []
