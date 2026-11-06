@@ -15,6 +15,7 @@ TABLES: dict[str, list[dict]] = {}
 
 def reset_db() -> None:
     TABLES.clear()
+    AUTO_PRICES.clear()
     rows = [("^GSPC", "S&P 500", "지수"), ("^KS11", "코스피", "지수"), ("KRW=X", "원/달러", "환율"),
             ("^TNX", "미국 10년물", "금리"), ("ecos:KR10Y", "한국 10년물", "금리")]
     TABLES["indicator_settings"] = [
@@ -128,6 +129,8 @@ def fake_closes(symbols) -> pd.DataFrame:
     return pd.DataFrame({s: fake_ohlcv(s, "1d")["Close"] for s in symbols if s in BASE})
 
 
+AUTO_PRICES: dict[str, float] = {}  # 네이버 시세 대신 (테스트에서 채움)
+
 KRX = pd.DataFrame([{"symbol": "005930.KS", "name": "삼성전자", "market": "KOSPI"},
                     {"symbol": "005935.KS", "name": "삼성전자우", "market": "KOSPI"},
                     {"symbol": "247540.KQ", "name": "에코프로비엠", "market": "KOSDAQ"}])
@@ -146,6 +149,7 @@ def install() -> None:
     indicators.get_client = watchlist.get_client = portfolio.get_client = lambda: FakeClient()
     market.fetch_yf_closes = fake_closes
     market.validate_yf_symbol = lambda s: s in BASE
+    market.auto_price = lambda s: AUTO_PRICES.get(s)
     charting.fetch_ohlcv = fake_ohlcv
     symbols.krx_listing = lambda: KRX
     symbols.yf_search = lambda q: [{"symbol": "AAPL", "name": "Apple Inc.", "market": "NASDAQ"}] if "app" in q.lower() else []

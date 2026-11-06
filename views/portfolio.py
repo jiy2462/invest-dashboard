@@ -7,7 +7,7 @@ import streamlit as st
 
 from lib import portfolio as pf
 from lib import symbols
-from lib.market import fetch_yf_closes
+from lib import market
 
 UP, DOWN = "#d62728", "#1f5fbf"          # 한국식: 이익 빨강, 손실 파랑
 BAR, INK, MUTED = "#2a78d6", "#52514e", "#b9b8b2"
@@ -53,19 +53,25 @@ def fx_ticker(ccy: str) -> str:
 
 # ── 시세·환율 ───────────────────────────────────────────────
 ccys = (set(tx_all["currency"].dropna()) | set(cash_all["currency"].dropna()) | {"USD"}) - {"KRW"}
-quoted = sorted({s for s in tx_all["symbol"].dropna() if not s.startswith(MANUAL)})
+net_qty = tx_all.assign(q=tx_all["quantity"].where(tx_all["side"] == "buy", -tx_all["quantity"].where(
+    tx_all["side"] == "sell", 0))).groupby("symbol")["q"].sum() if not tx_all.empty else pd.Series(dtype=float)
+held_syms = set(net_qty[net_qty > 1e-9].index)  # 다 판 종목은 시세를 받지 않는다
+quoted = sorted(s for s in held_syms if not s.startswith(MANUAL))
 with st.spinner("시세 불러오는 중…"):
     try:
-        closes = fetch_yf_closes(tuple(sorted(set(quoted) | {fx_ticker(c) for c in ccys})))
+        closes = market.fetch_yf_closes(tuple(sorted(set(quoted) | {fx_ticker(c) for c in ccys})))
     except Exception:
         closes = pd.DataFrame()
 last = {c: float(closes[c].dropna().iloc[-1]) for c in closes.columns if not closes[c].dropna().empty}
 fx = {c: last[fx_ticker(c)] for c in ccys if fx_ticker(c) in last}
 prices, price_src = {}, {}
-for s in tx_all["symbol"].dropna().unique():
+for s in held_syms:
     manual = (asset_info.get(s) or {}).get("manual_price")
+    auto = market.auto_price(s) if s.startswith(MANUAL) else None
     if s in last and not s.startswith(MANUAL):
         prices[s], price_src[s] = last[s], "시세"
+    elif auto:
+        prices[s], price_src[s] = auto, "시세(네이버)"
     elif manual is not None and not pd.isna(manual):
         prices[s], price_src[s] = float(manual), "직접 입력"
 
@@ -464,7 +470,8 @@ with tab_set:
                 "symbol": "티커", "name": "이름", "currency": "통화",
                 "asset_class": st.column_config.SelectboxColumn("자산군", options=class_options),
                 "manual_price": st.column_config.NumberColumn("직접 입력 현재가", format="localized",
-                                                              help="시세가 안 잡히는 종목만. 시세가 있으면 시세를 먼저 써요."),
+                                                              help="시세가 안 잡히는 종목만. 자동 시세(야후, KRX 금은 네이버)를 "
+                                                                   "못 받을 때만 이 값을 써요."),
             })
         if st.button("종목 저장", key="save-assets"):
             before = assets.set_index("symbol")

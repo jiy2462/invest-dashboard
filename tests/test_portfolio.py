@@ -228,3 +228,26 @@ def test_add_transactions_and_snapshot():
     at.button(key="save-snapshot").click().run()
     assert not at.exception
     assert {s["asset_class"] for s in fakes.TABLES["portfolio_snapshots"]} >= {"S&P 500", "금", "투자유보현금"}
+
+
+def test_parse_naver_close():
+    from lib.market import parse_naver_close
+    assert parse_naver_close('{"isSuccess":true,"result":{"closePrice":"176,690.00","fluctuations":"-120"}}') == 176690
+    assert parse_naver_close('<script>{"closePrice":"177,050"}</script>') == 177050
+    assert parse_naver_close('{"closePrice":"-"}') is None
+    assert parse_naver_close("") is None
+
+
+def test_krx_gold_uses_auto_price_over_manual():
+    seed()
+    fakes.AUTO_PRICES["MANUAL:KRX 금현물"] = 180000
+    at = run("portfolio")
+    assert not at.exception
+    df = at.dataframe[0].value
+    row = df[df["종목"] == "KRX 금현물"].iloc[0]
+    assert row["현재가"] == 180000 and row["시세"] == "시세(네이버)"
+
+    fakes.AUTO_PRICES.clear()               # 네이버 실패 → 직접 입력값
+    at = run("portfolio")
+    row = at.dataframe[0].value.set_index("종목").loc["KRX 금현물"]
+    assert row["현재가"] == 150000 and row["시세"] == "직접 입력"
