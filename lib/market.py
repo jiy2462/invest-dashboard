@@ -140,11 +140,11 @@ def ecos_key() -> str:
 
 
 def _kr_rate(sym: str, key: str) -> tuple[pd.Series | None, str | None]:
-    """한국 금리 하나: 네이버 금융 → (키가 있으면) 한국은행 ECOS 순서."""
+    """한국 금리 하나: Investing.com → 네이버 금융 → (키가 있으면) 한국은행 ECOS 순서."""
     if sym not in ECOS_SERIES and sym not in kr_rates.SUPPORTED:
         return None, f"`{sym}`은 아직 지원하지 않는 한국 금리 지표예요"
     reasons = []
-    try:  # 1) 네이버 금융 (해외 서버에서도 열리는 편)
+    try:  # 1) Investing.com → 네이버 금융 (해외 서버에서도 열리는 곳)
         return kr_rates.fetch(sym), None
     except kr_rates.KrRateError as e:
         reasons.append(str(e))

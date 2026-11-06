@@ -1,6 +1,7 @@
-"""한국 금리를 네이버 금융에서 가져온다 (한국은행 ECOS가 해외 서버에서 막힐 때 대신 사용).
+"""한국 금리를 해외 서버에서도 받을 수 있는 곳에서 가져온다 (한국은행 ECOS가 해외에서 막혀서).
 
-네이버는 공식 API가 아니어서 형식이 바뀔 수 있다. 실패하면 이유를 담아 KrRateError를 던진다.
+순서: Investing.com(FinanceDataReader 경유) → 네이버 금융. 모두 비공식이라 형식이 바뀔 수 있고,
+실패하면 각 출처의 이유를 모아 KrRateError를 던진다.
 """
 from __future__ import annotations
 
@@ -22,7 +23,13 @@ NAVER_BOND_CODES = {
     "ecos:KR10Y": "KR10YT=RR",     # 국고채(10년)
     "ecos:KR3Y": "KR3YT=RR",
 }
-SUPPORTED = set(NAVER_DAILY_CODES) | set(NAVER_BOND_CODES)
+# Investing.com 심볼 (FinanceDataReader의 'INVESTING:<심볼>')
+INVESTING_CODES = {
+    "ecos:KR10Y": "KR10YT=RR",     # 국고채(10년)
+    "ecos:KR3Y": "KR3YT=RR",       # 국고채(3년)
+    "ecos:CD91": "KRCD91M=ED",     # CD(91일)
+}
+SUPPORTED = set(NAVER_DAILY_CODES) | set(NAVER_BOND_CODES) | set(INVESTING_CODES)
 
 _ROW = re.compile(r'class="date">\s*([0-9]{4}\.[0-9]{2}\.[0-9]{2})\s*</td>\s*<td class="num">\s*([0-9.,-]+)', re.S)
 
@@ -97,17 +104,40 @@ def fetch_naver_bond(reuters_code: str) -> pd.Series:
     return pd.Series(values).sort_index()
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_investing(code: str) -> pd.Series:
+    """FinanceDataReader의 Investing.com 리더. 기본 경로('KR10YT=RR'만 쓰면 Yahoo로 가서 실패)를 피하려고 접두어를 붙인다."""
+    import FinanceDataReader as fdr
+
+    start = (pd.Timestamp.today() - pd.Timedelta(days=150)).strftime("%Y-%m-%d")
+    df = fdr.DataReader(f"INVESTING:{code}", start)
+    if df is None or df.empty or "Close" not in df:
+        raise KrRateError(f"Investing {code}: 값이 없어요")
+    s = df["Close"].dropna()
+    s.index = pd.to_datetime(s.index).tz_localize(None) if getattr(s.index, "tz", None) else pd.to_datetime(s.index)
+    return s.sort_index()
+
+
+def _reason(source: str, e: Exception) -> str:
+    if isinstance(e, KrRateError):
+        return str(e)
+    detail = str(e).split("\n")[0][:60]
+    return f"{source} {type(e).__name__}" + (f" ({detail})" if detail else "")
+
+
 def fetch(symbol: str) -> pd.Series:
     """네이버에서 가능한 방법을 차례로 시도한다. 모두 실패하면 이유를 모아 KrRateError."""
     reasons = []
     attempts = []
+    if symbol in INVESTING_CODES:
+        attempts.append(("Investing", lambda: fetch_investing(INVESTING_CODES[symbol])))
     if symbol in NAVER_DAILY_CODES:
-        attempts.append(lambda: fetch_naver_daily(NAVER_DAILY_CODES[symbol]))
+        attempts.append(("네이버", lambda: fetch_naver_daily(NAVER_DAILY_CODES[symbol])))
     if symbol in NAVER_BOND_CODES:
-        attempts.append(lambda: fetch_naver_bond(NAVER_BOND_CODES[symbol]))
-    for attempt in attempts:
+        attempts.append(("네이버", lambda: fetch_naver_bond(NAVER_BOND_CODES[symbol])))
+    for source, attempt in attempts:
         try:
             return attempt()
         except Exception as e:  # 접속 실패, 형식 변경
-            reasons.append(str(e) if isinstance(e, KrRateError) else f"네이버 {type(e).__name__}")
+            reasons.append(_reason(source, e))
     raise KrRateError(" / ".join(reasons) or "지원하지 않는 지표예요")
