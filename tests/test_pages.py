@@ -71,3 +71,26 @@ def test_market_mini_candles_with_moving_averages():
     assert "50일선" in names and "200일선" in names
     md = " ".join(m.value for m in at.markdown)
     assert "200일 " in md
+
+
+def test_click_watchlist_row_opens_chart():
+    at = run("watchlist")
+    at.text_input[0].set_value("삼성").run()
+    at.button[0].click().run()
+    [b for b in at.button if b.label == "관심종목에 추가"][0].click().run()
+    # 다른 종목 차트를 연 뒤
+    at.text_input[0].set_value("apple").run()
+    [b for b in at.button if b.label == "차트 보기"][0].click().run()
+    assert at.session_state.chart_symbol["symbol"] == "AAPL"
+    # 표가 차트보다 위에 있어요
+    labels = [s.value for s in at.subheader]
+    assert "관심종목" in labels
+    # 표에서 종목명 셀을 누르면 그 종목 차트가 바로 열려요
+    at.session_state["watch-table-전체"] = {"selection": {"rows": [], "columns": [], "cells": [(0, "종목")]}}
+    at.run()
+    assert not at.exception
+    assert at.session_state.chart_symbol["symbol"] == "005930.KS"
+    # 같은 선택이 남아 있어도 검색으로 연 차트를 덮어쓰지 않아요
+    at.text_input[0].set_value("apple").run()
+    [b for b in at.button if b.label == "차트 보기"][0].click().run()
+    assert at.session_state.chart_symbol["symbol"] == "AAPL"

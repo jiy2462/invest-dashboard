@@ -64,8 +64,58 @@ def watch_table(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ── 차트 ───────────────────────────────────────────────────
 current = st.session_state.chart_symbol
+
+# ── 관심종목 표 (차트 바로 위) ──────────────────────────────
+st.subheader("관심종목")
+if watch.empty:
+    st.info("아직 관심종목이 없어요. 종목을 검색해 차트에서 추가해 보세요.")
+else:
+    with st.spinner("관심종목 시세 불러오는 중…"):
+        table = watch_table(watch)
+    groups = ["전체"] + sorted({g for g in table["그룹"] if g})
+    gsel = st.radio("그룹", groups, horizontal=True, label_visibility="collapsed")
+    view = table if gsel == "전체" else table[table["그룹"] == gsel]
+    st.caption("종목명이나 티커를 누르면 바로 아래에 차트가 열려요.")
+    event = st.dataframe(
+        view.drop(columns=["id"]), hide_index=True, width="stretch",
+        on_select="rerun", selection_mode=["single-row", "single-cell"], key=f"watch-table-{gsel}",
+        column_config={
+            "현재가": st.column_config.NumberColumn(format="localized"),
+            "등락률": st.column_config.NumberColumn(format="%+.2f%%"),
+            "52주 위치": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f%%",
+                                                       help="52주 최저가 0% ~ 최고가 100%"),
+        },
+    )
+    sel = event.selection if event else None
+    idx = None
+    if sel and sel.get("cells"):
+        idx = sel["cells"][0][0]
+    elif sel and sel.get("rows"):
+        idx = sel["rows"][0]
+    r = view.iloc[idx] if idx is not None and idx < len(view) else None
+    picked = r["티커"] if r is not None else None
+    # 표에서 새로 고른 종목일 때만 차트를 바꿔요 (검색으로 연 차트를 덮어쓰지 않도록)
+    if picked != st.session_state.get("watch_pick"):
+        st.session_state.watch_pick = picked
+        if picked and (current is None or current["symbol"] != picked):
+            st.session_state.chart_symbol = {"symbol": picked, "name": r["종목"], "market": symbols.market_for(picked)}
+            st.rerun()
+    if r is not None:
+        b1, b2 = st.columns([1, 4])
+        if b1.button("관심종목에서 빼기"):
+            wl.remove_from_watchlist(int(r["id"]))
+            st.session_state.watch_pick = None
+            st.rerun()
+        with b2.popover(f"{r['종목']} 그룹·메모 수정"):
+            ng = st.text_input("그룹", r["그룹"], key=f"eg-{r['id']}")
+            nm = st.text_input("메모", r["메모"], key=f"em-{r['id']}")
+            if st.button("저장", key=f"es-{r['id']}"):
+                wl.update_watchlist(int(r["id"]), ng, nm)
+                st.rerun()
+    st.divider()
+
+# ── 차트 ───────────────────────────────────────────────────
 if current:
     sym = current["symbol"]
     c1, c2, c3 = st.columns([1, 1, 3])
@@ -152,41 +202,3 @@ if current:
                     if cc2.button("삭제", key=f"del-d-{d['id']}"):
                         wl.delete_drawing(d["id"])
                         st.rerun()
-
-# ── 관심종목 목록 ───────────────────────────────────────────
-st.divider()
-st.subheader("관심종목")
-if watch.empty:
-    st.info("아직 관심종목이 없어요. 종목을 검색해 차트에서 추가해 보세요.")
-else:
-    with st.spinner("관심종목 시세 불러오는 중…"):
-        table = watch_table(watch)
-    groups = ["전체"] + sorted({g for g in table["그룹"] if g})
-    gsel = st.radio("그룹", groups, horizontal=True, label_visibility="collapsed")
-    view = table if gsel == "전체" else table[table["그룹"] == gsel]
-    event = st.dataframe(
-        view.drop(columns=["id"]), hide_index=True, width="stretch",
-        on_select="rerun", selection_mode="single-row", key="watch-table",
-        column_config={
-            "현재가": st.column_config.NumberColumn(format="localized"),
-            "등락률": st.column_config.NumberColumn(format="%+.2f%%"),
-            "52주 위치": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f%%",
-                                                       help="52주 최저가 0% ~ 최고가 100%"),
-        },
-    )
-    rows = event.selection.rows if event and event.selection else []
-    if rows:
-        r = view.iloc[rows[0]]
-        b1, b2, b3 = st.columns([1, 1, 3])
-        if b1.button(f"{r['종목']} 차트 보기", type="primary"):
-            st.session_state.chart_symbol = {"symbol": r["티커"], "name": r["종목"], "market": symbols.market_for(r["티커"])}
-            st.rerun()
-        if b2.button("관심종목에서 빼기"):
-            wl.remove_from_watchlist(int(r["id"]))
-            st.rerun()
-        with b3.popover("그룹·메모 수정"):
-            ng = st.text_input("그룹", r["그룹"], key=f"eg-{r['id']}")
-            nm = st.text_input("메모", r["메모"], key=f"em-{r['id']}")
-            if st.button("저장", key=f"es-{r['id']}"):
-                wl.update_watchlist(int(r["id"]), ng, nm)
-                st.rerun()
