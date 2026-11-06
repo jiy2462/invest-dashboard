@@ -112,7 +112,7 @@ class FakeClient:
 BASE = {"^GSPC": 6800, "^KS11": 4000, "KRW=X": 1430, "^TNX": 4.1, "005930.KS": 98000, "AAPL": 270, "SPYM": 86}
 
 
-def fake_ohlcv(symbol: str, interval: str) -> pd.DataFrame:
+def fake_ohlcv(symbol: str, interval: str, period: str | None = None) -> pd.DataFrame:
     if symbol not in BASE:
         return pd.DataFrame()
     n = 60 * 13 if interval == "30m" else 800
@@ -160,6 +160,7 @@ def install() -> None:
     backtest.fetch_fred_krw = lambda: fake_history(("DEXKOUS",))["DEXKOUS"]
     market.fetch_yf_closes = fake_closes
     market.fetch_yf_ohlc = lambda syms: {s: fake_ohlcv(s, "1d") for s in syms if s in BASE}
+    market.fetch_yf_ohlc_cached = market.fetch_yf_ohlc
     market.validate_yf_symbol = lambda s: s in BASE
     market.auto_price = lambda s: AUTO_PRICES.get(s)
     charting.fetch_ohlcv = fake_ohlcv

@@ -13,10 +13,26 @@ INTERVALS = {"30분봉": "30m", "일봉": "1d", "주봉": "1wk", "월봉": "1mo"
 PERIODS = {"1개월": 30, "3개월": 91, "6개월": 182, "1년": 365, "3년": 1095, "5년": 1826, "10년": 3652, "최대": None}
 
 
+MA_BUFFER_DAYS = 300  # 200일선을 화면 첫날부터 그리려면 필요한 과거 (휴장일 여유 포함)
+
+
+def history_period(interval: str, days: int | None) -> str:
+    """보여줄 기간 + 이동평균선 계산분만 받도록 yfinance period를 고른다 (일봉 '최대'는 수십 년치라 느림)."""
+    if interval == "30m":
+        return "60d"
+    if interval != "1d" or days is None:
+        return "max"  # 주봉·월봉은 '최대'도 가볍다
+    need = days + MA_BUFFER_DAYS
+    for limit, period in ((730, "2y"), (1826, "5y"), (3652, "10y")):
+        if need <= limit:
+            return period
+    return "max"
+
+
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_ohlcv(symbol: str, interval: str) -> pd.DataFrame:
-    """전체 기간을 받아 두고 화면에서 기간만 자른다(긴 이동평균선 계산용)."""
-    period = "60d" if interval == "30m" else "max"
+def fetch_ohlcv(symbol: str, interval: str, period: str | None = None) -> pd.DataFrame:
+    """필요한 기간만 받아 두고 화면에서 기간을 자른다(긴 이동평균선 계산용)."""
+    period = period or ("60d" if interval == "30m" else "max")
     df = yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=False)
     if df is None or df.empty:
         return pd.DataFrame()
