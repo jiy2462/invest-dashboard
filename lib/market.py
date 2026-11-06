@@ -1,6 +1,7 @@
 """시세 데이터 불러오기: yfinance(지수·환율·원자재·코인 등)와 한국은행 ECOS(한국 금리)."""
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 
 import pandas as pd
@@ -152,3 +153,50 @@ def validate_yf_symbol(symbol: str) -> bool:
         return not hist.empty
     except Exception:
         return False
+
+
+# 야후에 없는 국내 시세: 네이버 증권 시장지표 (구글 시트와 같은 출처)
+NAVER_METALS = {"MANUAL:KRX 금현물": "M04020000"}  # KRX 금 1g (원)
+_NAVER_URLS = (
+    "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=metals&reutersCode={code}",
+    "https://api.stock.naver.com/marketindex/metals/{code}",
+    "https://m.stock.naver.com/marketindex/metals/{code}",
+)
+_CLOSE_RE = re.compile(r'"closePrice"\s*:\s*"?([0-9][0-9,]*\.?[0-9]*)')
+
+
+def parse_naver_close(text: str) -> float | None:
+    """네이버 응답(JSON 또는 페이지 HTML)에서 현재가(closePrice)를 꺼낸다."""
+    m = _CLOSE_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        v = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_naver_metal(code: str) -> float | None:
+    for url in _NAVER_URLS:
+        try:
+            r = requests.get(url.format(code=code), timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        except Exception:
+            continue
+        if r.ok:
+            v = parse_naver_close(r.text)
+            if v:
+                return v
+    return None
+
+
+def auto_price(symbol: str) -> float | None:
+    """티커 없는 자산 중 자동 시세가 있는 것 (예: KRX 금현물). 없거나 실패하면 None."""
+    code = NAVER_METALS.get(symbol)
+    if not code:
+        return None
+    try:
+        return fetch_naver_metal(code)
+    except Exception:
+        return None

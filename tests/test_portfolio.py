@@ -183,7 +183,7 @@ def test_portfolio_page_with_data():
     seed()
     at = run("portfolio")
     assert not at.exception
-    assert [t.label for t in at.tabs] == ["보유 현황", "자산 배분·리밸런싱", "거래 입력·내역", "실현손익·배당", "설정"]
+    assert [t.label for t in at.tabs] == ["보유 현황", "자산 배분·리밸런싱", "거래 입력·내역", "실현손익·배당", "달러 환전", "설정"]
     assert at.metric[0].label == "총 평가금액"
     assert any(s.value == "리밸런싱" for s in at.subheader)
     md = " ".join(m.value for m in at.markdown)
@@ -228,3 +228,56 @@ def test_add_transactions_and_snapshot():
     at.button(key="save-snapshot").click().run()
     assert not at.exception
     assert {s["asset_class"] for s in fakes.TABLES["portfolio_snapshots"]} >= {"S&P 500", "금", "투자유보현금"}
+
+
+def test_parse_naver_close():
+    from lib.market import parse_naver_close
+    assert parse_naver_close('{"isSuccess":true,"result":{"closePrice":"176,690.00","fluctuations":"-120"}}') == 176690
+    assert parse_naver_close('<script>{"closePrice":"177,050"}</script>') == 177050
+    assert parse_naver_close('{"closePrice":"-"}') is None
+    assert parse_naver_close("") is None
+
+
+def test_krx_gold_uses_auto_price_over_manual():
+    seed()
+    fakes.AUTO_PRICES["MANUAL:KRX 금현물"] = 180000
+    at = run("portfolio")
+    assert not at.exception
+    df = at.dataframe[0].value
+    row = df[df["종목"] == "KRX 금현물"].iloc[0]
+    assert row["현재가"] == 180000 and row["시세"] == "시세(네이버)"
+
+    fakes.AUTO_PRICES.clear()               # 네이버 실패 → 직접 입력값
+    at = run("portfolio")
+    row = at.dataframe[0].value.set_index("종목").loc["KRX 금현물"]
+    assert row["현재가"] == 150000 and row["시세"] == "직접 입력"
+
+
+def fx_rows(rows):
+    return pd.DataFrame([dict(id=i + 1, trade_date=date.fromisoformat(d), side=s, currency="USD", amount=a, rate=r,
+                              fee=f, account_id=None, memo=None) for i, (d, s, a, r, f) in enumerate(rows)])
+
+
+def test_fx_summary_matches_sheet_average_and_tracks_reconversion():
+    log = fx_rows([("2025-01-02", "buy", 1000, 1400, 0), ("2025-02-01", "buy", 1000, 1500, 0),
+                   ("2025-03-01", "sell", 500, 1480, 1000), ("2025-04-01", "buy", 500, 1300, 0)])
+    s = pf.fx_summary(log, current_rate=1450)
+    assert s["avg_rate"] == pytest.approx((1400000 + 1500000 + 650000) / 2500)   # 시트 방식: 전체 매수 평균
+    assert s["held"] == pytest.approx(2000)
+    assert s["realized"] == pytest.approx(500 * 1480 - 1000 - 500 * 1450)        # 이동평균 1450
+    assert s["held_avg_rate"] == pytest.approx((1500 * 1450 + 500 * 1300) / 2000)
+    assert s["unrealized"] == pytest.approx(2000 * 1450 - (1500 * 1450 + 500 * 1300))
+
+
+def test_fx_tab_add_and_show():
+    seed()
+    at = run("portfolio")
+    assert not at.exception
+    at.number_input(key="fx-amt").set_value(700).run()
+    at.number_input(key="fx-rate").set_value(1430).run()
+    at.text_input(key="fx-memo").set_value("목표환율 도달").run()
+    at.button(key="save-fx").click().run()
+    assert not at.exception
+    r = fakes.TABLES["fx_exchanges"][-1]
+    assert (r["side"], r["currency"], r["amount"], r["rate"], r["memo"]) == ("buy", "USD", 700, 1430, "목표환율 도달")
+    assert any(m.label == "평균 환전 환율" and m.value == "1,430.00" for m in at.metric)
