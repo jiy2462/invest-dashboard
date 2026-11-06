@@ -41,9 +41,13 @@ def fetch_yf_closes(symbols: tuple[str, ...]) -> pd.DataFrame:
     return closes
 
 
+class EcosError(Exception):
+    """ECOS가 데이터 대신 오류를 돌려줄 때 (예: 인증키 오류, 데이터 없음)."""
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_ecos(symbol: str, api_key: str) -> pd.Series:
-    """ECOS 일별 금리 시계열(%). 실패하면 빈 Series."""
+    """ECOS 일별 금리 시계열(%). 실패하면 EcosError."""
     stat, item = ECOS_SERIES[symbol]
     end = date.today()
     start = end - timedelta(days=LOOKBACK_DAYS)
@@ -51,19 +55,46 @@ def fetch_ecos(symbol: str, api_key: str) -> pd.Series:
         f"https://ecos.bok.or.kr/api/StatisticSearch/{api_key}/json/kr/1/500/"
         f"{stat}/D/{start:%Y%m%d}/{end:%Y%m%d}/{item}"
     )
-    rows = requests.get(url, timeout=10).json().get("StatisticSearch", {}).get("row", [])
-    if not rows:
-        return pd.Series(dtype=float)
-    s = pd.Series(
-        [float(r["DATA_VALUE"]) for r in rows],
-        index=pd.to_datetime([r["TIME"] for r in rows], format="%Y%m%d"),
-    )
-    return s.sort_index()
+    try:
+        body = requests.get(url, timeout=15).json()
+    except Exception as e:  # 접속 실패, JSON 아님
+        raise EcosError(f"ECOS 접속 실패: {type(e).__name__}") from e
+    if "RESULT" in body:  # 오류 응답: {"RESULT": {"CODE": "INFO-100", "MESSAGE": "..."}}
+        r = body["RESULT"]
+        raise EcosError(f"ECOS {r.get('CODE', '')}: {r.get('MESSAGE', '')}")
+    rows = body.get("StatisticSearch", {}).get("row", [])
+    values = {}
+    for r in rows:
+        try:
+            values[pd.to_datetime(r["TIME"], format="%Y%m%d")] = float(r["DATA_VALUE"])
+        except (KeyError, TypeError, ValueError):
+            continue  # 휴일 등 빈 값
+    if not values:
+        raise EcosError("ECOS 응답에 값이 없어요")
+    return pd.Series(values).sort_index()
 
 
-def load_series(settings: list[dict]) -> dict[str, pd.Series]:
-    """지표 설정 목록에 대해 {symbol: 종가 시계열}을 돌려준다. 못 받은 지표는 빠진다."""
+def ecos_key() -> str:
+    """Secrets의 ECOS_API_KEY. 실수로 [섹션] 아래에 넣은 경우도 찾아본다."""
+    def find(d):
+        for k, v in d.items():
+            if k.strip().upper() == "ECOS_API_KEY" and isinstance(v, str):
+                return v
+            if isinstance(v, dict):
+                hit = find(v)
+                if hit:
+                    return hit
+        return ""
+    try:
+        return find(st.secrets.to_dict()).strip()
+    except Exception:
+        return ""
+
+
+def load_series(settings: list[dict]) -> tuple[dict[str, pd.Series], dict[str, str]]:
+    """지표 설정 목록에 대해 ({symbol: 시계열}, {symbol: 못 받은 이유})를 돌려준다."""
     out: dict[str, pd.Series] = {}
+    errors: dict[str, str] = {}
     yf_symbols = tuple(sorted({s["symbol"] for s in settings if s["source"] == "yfinance"}))
     try:
         closes = fetch_yf_closes(yf_symbols)
@@ -74,17 +105,24 @@ def load_series(settings: list[dict]) -> dict[str, pd.Series]:
             s = closes[sym].dropna()
             if not s.empty:
                 out[sym] = s
-
-    ecos_key = st.secrets.get("ECOS_API_KEY", "")
-    for s in settings:
-        if s["source"] == "ecos" and ecos_key and s["symbol"] in ECOS_SERIES:
-            try:
-                series = fetch_ecos(s["symbol"], ecos_key)
-            except Exception:
                 continue
-            if not series.empty:
-                out[s["symbol"]] = series
-    return out
+        errors[sym] = f"`{sym}` 시세를 못 받았어요"
+
+    key = ecos_key()
+    for s in settings:
+        if s["source"] != "ecos":
+            continue
+        sym = s["symbol"]
+        if sym not in ECOS_SERIES:
+            errors[sym] = f"`{sym}`은 아직 지원하지 않는 ECOS 지표예요"
+        elif not key:
+            errors[sym] = "Secrets에 ECOS_API_KEY가 없어요"
+        else:
+            try:
+                out[sym] = fetch_ecos(sym, key)
+            except EcosError as e:
+                errors[sym] = str(e)
+    return out, errors
 
 
 def summarize(series: pd.Series, is_rate: bool) -> dict:

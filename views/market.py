@@ -27,12 +27,11 @@ def sparkline(s: pd.Series, color: str) -> go.Figure:
     return fig
 
 
-def card(name: str, symbol: str, series: pd.Series | None, is_rate: bool, source: str) -> None:
+def card(name: str, symbol: str, series: pd.Series | None, is_rate: bool, error: str | None) -> None:
     with st.container(border=True):
         if series is None:
             st.markdown(f"**{name}**")
-            hint = "Secrets에 ECOS_API_KEY가 필요해요" if source == "ecos" else f"`{symbol}` 시세를 못 받았어요"
-            st.caption(hint)
+            st.caption(error or f"`{symbol}` 시세를 못 받았어요")
             return
         s = summarize(series, is_rate)
         color = UP if s["change"] > 0 else DOWN if s["change"] < 0 else FLAT
@@ -63,7 +62,7 @@ with tab_view:
         st.info("보이는 지표가 없어요. ‘지표 편집’에서 추가해 주세요.")
     else:
         with st.spinner("시세를 불러오는 중…"):
-            data = load_series(visible)
+            data, errors = load_series(visible)
         if st.button("새로고침", help="시세는 15분 동안 캐시돼요"):
             st.cache_data.clear()
             st.rerun()
@@ -78,7 +77,7 @@ with tab_view:
                 for col, row in zip(cols, rows[i:i + per_row]):
                     with col:
                         card(row["display_name"], row["symbol"], data.get(row["symbol"]),
-                             is_rate=(group == "금리"), source=row["source"])
+                             is_rate=(group == "금리"), error=errors.get(row["symbol"]))
 
 with tab_edit:
     st.caption("표에서 바로 고치고 ‘저장’을 누르세요. 행을 지우면 지표가 삭제돼요. 금리 그룹은 등락을 bp로 보여줘요.")
