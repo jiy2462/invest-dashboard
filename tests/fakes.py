@@ -139,10 +139,18 @@ KRX = pd.DataFrame([{"symbol": "005930.KS", "name": "삼성전자", "market": "K
                     {"symbol": "247540.KQ", "name": "에코프로비엠", "market": "KOSDAQ"}])
 
 
+def fake_fear_greed() -> pd.Series:
+    idx = pd.date_range(end="2026-11-05", periods=300, freq="D")
+    rng = np.random.default_rng(7)
+    wave = 50 + 30 * np.sin(np.arange(len(idx)) / 25) + rng.normal(0, 4, len(idx))
+    return pd.Series(np.clip(wave, 2, 98), index=idx)
+
+
 def install() -> None:
     """앱 모듈의 네트워크 함수를 가짜로 바꾼다."""
     import lib.backtest as backtest
     import lib.charting as charting
+    import lib.fear_greed as fear_greed
     import lib.indicators as indicators
     import lib.insight as insight
     import lib.kr_rates as kr_rates
@@ -168,6 +176,7 @@ def install() -> None:
     def offline(code, *a, **k):
         raise kr_rates.KrRateError("테스트: 접속 안 함")
 
+    fear_greed.fetch = fake_fear_greed
     kr_rates.fetch_investing = kr_rates.fetch_naver_daily = kr_rates.fetch_naver_bond = offline
     symbols.krx_listing = lambda: KRX
     symbols.yf_search = lambda q: [{"symbol": "AAPL", "name": "Apple Inc.", "market": "NASDAQ"}] if "app" in q.lower() else []

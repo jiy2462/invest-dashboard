@@ -48,6 +48,8 @@ def market_of(symbol: str) -> str:
     s = symbol.upper()
     if s.startswith("ECOS:"):
         return "kr"
+    if s.startswith("CNN:"):  # 미국 장중에 바뀐다
+        return "us"
     if s in _INDEX:
         return _INDEX[s]
     if s.endswith("=X"):

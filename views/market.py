@@ -2,7 +2,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from lib import indicators, market_hours, ui
+from lib import fear_greed, indicators, market_hours, ui
 from lib.charting import ma_color
 from lib.market import clear_cache, load_ohlc, summarize, validate_yf_symbol
 
@@ -21,6 +21,29 @@ def fmt_value(v: float, is_rate: bool) -> str:
 
 MINI_DAYS = 90  # 카드에 보여줄 기간
 MINI_MAS = (50, 200)
+CHART_H = 120  # 카드 차트 높이 (휴대폰에서 2열×2행이 한 화면에 들어가도록)
+
+# 휴대폰(640px 이하): 카드를 2열로 두고 여백·글자를 줄인다. Streamlit은 원래 1열로 쌓는다.
+MOBILE_CSS = """
+<style>
+@media (max-width: 640px) {
+  .st-key-mkt-grid [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; gap: 0.5rem !important; }
+  .st-key-mkt-grid [data-testid="stColumn"] {
+    flex: 1 1 calc(50% - 0.25rem) !important; min-width: calc(50% - 0.25rem) !important;
+    max-width: calc(50% - 0.25rem) !important; width: calc(50% - 0.25rem) !important;
+  }
+  .st-key-mkt-grid [data-testid="stColumn"]:not(:has([data-testid="stElementContainer"])) { display: none !important; }
+  .st-key-mkt-grid [class*="st-key-card-"] { padding: 0.6rem 0.65rem 0.45rem !important; }
+  .st-key-mkt-grid [class*="st-key-card-"] [data-testid="stVerticalBlock"] { gap: 0.2rem !important; }
+  .st-key-mkt-grid .ios-label { font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .st-key-mkt-grid .ios-value { font-size: 1.15rem; }
+  .st-key-mkt-grid .ios-delta { font-size: 0.75rem; }
+  .st-key-mkt-grid .ios-legend { font-size: 0.66rem; }
+  .st-key-mkt-grid [data-testid="stCaptionContainer"] p { font-size: 0.64rem; }
+  .st-key-mkt-grid [data-testid="stHeading"] h3 { font-size: 1.05rem; padding-top: 0.3rem; }
+}
+</style>
+"""
 
 
 def mini_chart(df: pd.DataFrame, candles: bool) -> go.Figure:
@@ -49,7 +72,7 @@ def mini_chart(df: pd.DataFrame, candles: bool) -> go.Figure:
             fig.add_trace(go.Scatter(x=x, y=m.values, mode="lines", name=f"{n}일선",
                                      line=dict(color=ma_color(n), width=1.2),
                                      hovertemplate=f"{n}일선 %{{y:,.2f}}<extra></extra>"))
-    fig.update_layout(height=150, margin=dict(l=0, r=0, t=0, b=0), showlegend=False,
+    fig.update_layout(height=CHART_H, margin=dict(l=0, r=0, t=0, b=0), showlegend=False,
                       xaxis=dict(visible=False, type="category", rangeslider=dict(visible=False)),
                       yaxis=dict(visible=False), hovermode="x unified", dragmode=False,
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
@@ -69,11 +92,56 @@ def ma_legend(df: pd.DataFrame) -> str:
     return " &nbsp;".join(parts)
 
 
+FG_BAND_COLORS = [ui.RED, ui.ORANGE, ui.GRAY, ui.GREEN, ui.GREEN]
+
+
+def fear_greed_chart(score: pd.Series) -> go.Figure:
+    """공포·탐욕 지수 최근 90일. 0~100 구간을 옅은 색 띠로 깔아 둔다."""
+    view = score[score.index >= score.index[-1] - pd.Timedelta(days=MINI_DAYS)]
+    x = view.index.strftime("%y/%m/%d")
+    fig = go.Figure()
+    for (lo, hi, _), color in zip(fear_greed.BANDS, FG_BAND_COLORS):
+        fig.add_hrect(y0=lo, y1=min(hi, 100), fillcolor=color, opacity=0.07 if color != ui.GRAY else 0.05,
+                      line_width=0, layer="below")
+    fig.add_trace(go.Scatter(x=x, y=view.values, mode="lines", line=dict(color=ui.ink(), width=1.6), name="",
+                             hovertemplate="%{x} %{y:.0f}<extra></extra>"))
+    fig.update_layout(height=CHART_H, margin=dict(l=0, r=0, t=0, b=0), showlegend=False,
+                      xaxis=dict(visible=False, type="category"), yaxis=dict(visible=False, range=[0, 100]),
+                      hovermode="x unified", dragmode=False,
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    return fig
+
+
+def fear_greed_card(name: str, symbol: str, df: pd.DataFrame) -> None:
+    score = df["Close"]
+    last = float(score.iloc[-1])
+    prev = float(score.iloc[-2]) if len(score) > 1 else last
+    change = last - prev
+    color = UP if change > 0 else DOWN if change < 0 else FLAT
+    arrow = "▲" if change > 0 else "▼" if change < 0 else "–"
+    st.markdown(ui.stat(name, f"{last:.0f} <span style='font-size:0.95rem;font-weight:600'>"
+                              f"{fear_greed.rating_ko(last)}</span>", f"{arrow} {abs(change):.0f}", color),
+                unsafe_allow_html=True)
+    st.plotly_chart(fear_greed_chart(score), width="stretch",
+                    config={"displayModeBar": False, "scrollZoom": False}, key=f"mini-{symbol}")
+    ago = []
+    for label, days in (("1주 전", 7), ("1달 전", 30)):
+        past = score[score.index <= score.index[-1] - pd.Timedelta(days=days)]
+        if not past.empty:
+            ago.append(f"<span style='white-space:nowrap'>{label} {past.iloc[-1]:.0f}</span>")
+    if ago:
+        st.markdown(f"<div class='ios-legend'>{' &nbsp;'.join(ago)}</div>", unsafe_allow_html=True)
+    st.caption(f"{score.index[-1]:%Y-%m-%d} 기준 · CNN")
+
+
 def card(name: str, symbol: str, df: pd.DataFrame | None, is_rate: bool, error: str | None) -> None:
     with ui.card(f"mkt-{symbol}"):
         if df is None or df.empty:
             st.markdown(f"**{name}**")
             st.caption(error or f"`{symbol}` 시세를 못 받았어요")
+            return
+        if symbol == fear_greed.SYMBOL:
+            fear_greed_card(name, symbol, df)
             return
         s = summarize(df["Close"], is_rate)
         color = UP if s["change"] > 0 else DOWN if s["change"] < 0 else FLAT
@@ -111,15 +179,17 @@ with tab_view:
         groups: dict[str, list[dict]] = {}
         for row in visible:
             groups.setdefault(row["group_name"] or "기타", []).append(row)
+        st.html(MOBILE_CSS)
         per_row = 4
-        for group, rows in groups.items():
-            st.subheader(group)
-            for i in range(0, len(rows), per_row):
-                cols = st.columns(per_row)
-                for col, row in zip(cols, rows[i:i + per_row]):
-                    with col:
-                        card(row["display_name"], row["symbol"], data.get(row["symbol"]),
-                             is_rate=(group == "금리"), error=errors.get(row["symbol"]))
+        with st.container(key="mkt-grid"):
+            for group, rows in groups.items():
+                st.subheader(group)
+                for i in range(0, len(rows), per_row):
+                    cols = st.columns(per_row)
+                    for col, row in zip(cols, rows[i:i + per_row]):
+                        with col:
+                            card(row["display_name"], row["symbol"], data.get(row["symbol"]),
+                                 is_rate=(group == "금리"), error=errors.get(row["symbol"]))
 
     # 하단: 오늘의 명언 한 줄 미리보기 (오늘의 인사이트 화면이나 아침 예약 작업이 만들어 둔 것)
     try:
@@ -148,8 +218,8 @@ with tab_edit:
         column_config={
             "id": None,
             "display_name": st.column_config.TextColumn("이름", required=True),
-            "symbol": st.column_config.TextColumn("티커", required=True, help="yfinance 티커 (예: ^GSPC, 005930.KS) 또는 ecos:KR10Y"),
-            "source": st.column_config.SelectboxColumn("소스", options=["yfinance", "ecos"], default="yfinance"),
+            "symbol": st.column_config.TextColumn("티커", required=True, help="yfinance 티커 (예: ^GSPC, 005930.KS), ecos:KR10Y, cnn:fear_greed"),
+            "source": st.column_config.SelectboxColumn("소스", options=["yfinance", "ecos", "cnn"], default="yfinance"),
             "group_name": st.column_config.TextColumn("그룹"),
             "sort_order": st.column_config.NumberColumn("순서", step=1, default=99),
             "is_visible": st.column_config.CheckboxColumn("표시", default=True),

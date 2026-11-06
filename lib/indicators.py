@@ -27,6 +27,7 @@ PRESETS = [
     ("한국 3년물", "ecos:KR3Y", "ecos", "금리"),
     ("CD 91일", "ecos:CD91", "ecos", "금리"),
     ("VIX", "^VIX", "yfinance", "변동성"),
+    ("CNN 공포·탐욕 지수", "cnn:fear_greed", "cnn", "심리"),
     ("WTI", "CL=F", "yfinance", "원자재"),
     ("금", "GC=F", "yfinance", "원자재"),
     ("은", "SI=F", "yfinance", "원자재"),
