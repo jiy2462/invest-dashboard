@@ -22,7 +22,8 @@ def reset_db() -> None:
              display_name=n, group_name=g, sort_order=i + 1, is_visible=True)
         for i, (s, n, g) in enumerate(rows)
     ]
-    for t in ("assets", "watchlist", "chart_drawings", "accounts", "transactions"):
+    for t in ("assets", "watchlist", "chart_drawings", "accounts", "transactions", "target_allocation",
+              "cash_balances", "portfolio_snapshots", "app_settings"):
         TABLES[t] = []
 
 
@@ -81,9 +82,9 @@ class _Query:
             return _Res(sorted(out, key=lambda r: r.get(key) or 0))
         if self.op in ("insert", "upsert"):
             if self.op == "upsert":
-                k = self.on_conflict
+                keys = self.on_conflict.split(",")
                 for r in rows:
-                    if r.get(k) == self.payload[k]:
+                    if all(r.get(k) == self.payload[k] for k in keys):
                         r.update(self.payload)
                         return _Res([r])
             nid = max([r.get("id", 0) or 0 for r in rows] + [0]) + 1
@@ -104,7 +105,7 @@ class FakeClient:
         return _Query(name)
 
 
-BASE = {"^GSPC": 6800, "^KS11": 4000, "KRW=X": 1430, "^TNX": 4.1, "005930.KS": 98000, "AAPL": 270}
+BASE = {"^GSPC": 6800, "^KS11": 4000, "KRW=X": 1430, "^TNX": 4.1, "005930.KS": 98000, "AAPL": 270, "SPYM": 86}
 
 
 def fake_ohlcv(symbol: str, interval: str) -> pd.DataFrame:
@@ -137,11 +138,12 @@ def install() -> None:
     import lib.charting as charting
     import lib.indicators as indicators
     import lib.market as market
+    import lib.portfolio as portfolio
     import lib.symbols as symbols
     import lib.watchlist as watchlist
 
     reset_db()
-    indicators.get_client = watchlist.get_client = lambda: FakeClient()
+    indicators.get_client = watchlist.get_client = portfolio.get_client = lambda: FakeClient()
     market.fetch_yf_closes = fake_closes
     market.validate_yf_symbol = lambda s: s in BASE
     charting.fetch_ohlcv = fake_ohlcv

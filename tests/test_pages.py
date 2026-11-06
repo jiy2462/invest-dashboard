@@ -1,7 +1,6 @@
 """화면 스모크 테스트: python -m pytest tests (네트워크 불필요)."""
 import os
 
-import pytest
 from streamlit.testing.v1 import AppTest
 
 from tests import fakes
@@ -14,12 +13,6 @@ def run(page: str) -> AppTest:
     at = AppTest.from_file(os.path.join(HERE, "run_page.py"), default_timeout=60)
     at.secrets["APP_PASSWORD"] = "x"
     return at.run()
-
-
-@pytest.fixture(autouse=True)
-def fresh():
-    fakes.install()
-    fakes._installed = True
 
 
 def test_market_cards():
