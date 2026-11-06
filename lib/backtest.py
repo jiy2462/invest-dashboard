@@ -21,7 +21,7 @@ MAX_YEARS = 30
 CUSTOM = "T:"          # 직접 입력한 티커는 'T:AAPL'처럼 저장한다
 FX = "KRW=X"           # 원/달러 (야후는 2003년 말부터)
 RF = "^IRX"            # 미국 3개월 국채 금리(연 %): 샤프 지수의 무위험 수익률
-REBALANCE = {"none": "안 함", "quarterly": "분기마다", "yearly": "1년마다"}
+REBALANCE = {"none": "안 함", "quarterly": "분기마다", "semiannual": "6개월마다", "yearly": "1년마다"}
 
 
 @dataclass(frozen=True)
@@ -208,6 +208,8 @@ def fx_series(hist: dict[str, pd.Series]) -> pd.Series:
 def _period_key(ts: pd.Timestamp, kind: str):
     if kind == "quarterly":
         return (ts.year, (ts.month - 1) // 3)
+    if kind == "semiannual":
+        return (ts.year, (ts.month - 1) // 6)
     if kind == "yearly":
         return ts.year
     return (ts.year, ts.month)
