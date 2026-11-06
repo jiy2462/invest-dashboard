@@ -1,4 +1,4 @@
-streamlit>=1.40
+streamlit>=1.50
 supabase>=2.10
 yfinance>=0.2.50
 plotly>=5.24
