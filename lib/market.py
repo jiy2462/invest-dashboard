@@ -120,7 +120,7 @@ def load_series(settings: list[dict]) -> tuple[dict[str, pd.Series], dict[str, s
             errors[sym] = f"`{sym}`은 아직 지원하지 않는 한국 금리 지표예요"
             continue
         reasons = []
-        # 1) 네이버 금융 (해외 서버에서도 열리는 편)
+        # 1) Investing.com → 네이버 금융 (해외 서버에서도 열리는 곳)
         try:
             out[sym] = kr_rates.fetch(sym)
             continue
