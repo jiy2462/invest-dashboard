@@ -76,6 +76,12 @@ def fetch_yf_ohlc(symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
     return out
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_yf_ohlc_cached(symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
+    """관심종목 표용: 모든 종목의 일봉을 한 번에 받아 15분 동안 재사용한다."""
+    return fetch_yf_ohlc(symbols)
+
+
 def clean_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     """종가 없는 날은 빼고, 시가·고가·저가가 비면 종가로 채운다. 종가만 있는 시계열도 받는다."""
     if isinstance(df, pd.Series):

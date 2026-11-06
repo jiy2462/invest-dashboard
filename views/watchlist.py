@@ -3,7 +3,7 @@ import streamlit as st
 
 from lib import charting, symbols
 from lib import watchlist as wl
-from lib.market import fetch_yf_closes
+from lib.market import fetch_yf_ohlc_cached
 
 st.title("관심종목·차트")
 
@@ -39,24 +39,19 @@ except Exception:
 def watch_table(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
-    closes = fetch_yf_closes(tuple(sorted(df["symbol"].unique())))
-    year = {}
-    try:
-        for s in df["symbol"].unique():
-            d = charting.fetch_ohlcv(s, "1d")
-            year[s] = d[d.index >= d.index[-1] - pd.Timedelta(days=365)] if not d.empty else d
-    except Exception:
-        pass
+    # 모든 종목 일봉(약 15개월)을 한 번의 요청으로 받아 현재가·등락률·52주 위치를 함께 계산
+    ohlc = fetch_yf_ohlc_cached(tuple(sorted(df["symbol"].unique())))
     rows = []
     for _, r in df.iterrows():
-        s = closes[r["symbol"]].dropna() if r["symbol"] in closes.columns else pd.Series(dtype=float)
+        d = ohlc.get(r["symbol"])
+        s = d["Close"].dropna() if d is not None else pd.Series(dtype=float)
         price = float(s.iloc[-1]) if len(s) else None
         if price is not None:
             price = round(price) if r["currency"] == "KRW" else round(price, 2)
         chg = (float(s.iloc[-1]) / float(s.iloc[-2]) - 1) * 100 if len(s) > 1 else None
-        y = year.get(r["symbol"])
         pos = None
-        if y is not None and not y.empty and price is not None:
+        if d is not None and not d.empty and price is not None:
+            y = d[d.index >= d.index[-1] - pd.Timedelta(days=365)]
             lo, hi = float(y["Low"].min()), float(y["High"].max())
             pos = (price - lo) / (hi - lo) * 100 if hi > lo else None
         rows.append({"id": r["id"], "그룹": r["group_name"] or "", "종목": r["name"], "티커": r["symbol"],
@@ -116,7 +111,9 @@ else:
     st.divider()
 
 # ── 차트 ───────────────────────────────────────────────────
-if current:
+# 봉·기간·이동평균선을 바꿀 때는 이 부분만 다시 그려요 (관심종목 표는 그대로)
+@st.fragment
+def chart_section(current: dict, watch: pd.DataFrame) -> None:
     sym = current["symbol"]
     c1, c2, c3 = st.columns([1, 1, 3])
     interval_label = c1.selectbox("봉", list(charting.INTERVALS), index=1)
@@ -130,7 +127,7 @@ if current:
 
     with st.spinner("차트 불러오는 중…"):
         try:
-            df = charting.fetch_ohlcv(sym, interval)
+            df = charting.fetch_ohlcv(sym, interval, charting.history_period(interval, days))
         except Exception:
             df = pd.DataFrame()
     if df.empty:
@@ -202,3 +199,7 @@ if current:
                     if cc2.button("삭제", key=f"del-d-{d['id']}"):
                         wl.delete_drawing(d["id"])
                         st.rerun()
+
+
+if current:
+    chart_section(current, watch)
