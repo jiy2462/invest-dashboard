@@ -25,7 +25,7 @@ streamlit run app.py
 `?t=`가 붙은 주소를 남에게 주면 그 사람도 들어올 수 있으니 공유하지 말 것. 비밀번호를 바꾸면 기존 로그인은 모두 풀린다.
 
 ## DB
-Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL을 번호 순서대로 적용한다 (`001_init.sql` → `002_portfolio.sql` → `003_fx_exchanges.sql` → `004_backtest_runs.sql`).
+Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL을 번호 순서대로 적용한다 (`001_init.sql` → `002_portfolio.sql` → `003_fx_exchanges.sql` → `004_backtest_runs.sql` → `005_insight.sql`).
 
 ### 포트폴리오 계산 규칙
 - 평단은 이동평균법: 매도해도 평단은 그대로, 차액은 실현손익.
@@ -42,6 +42,12 @@ Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴�
 - '원금 손실 → 원금 회복'은 평가금액이 누적 투자금보다 적어진 날부터 다시 넘어선 날까지의 가장 긴 기간(개월).
 - 조합은 `backtest_presets` 표에 저장한다 (001_init.sql에 이미 있음).
 - 실행 결과(고른 옵션 + 지표 + 주 단위 곡선)는 `backtest_runs` 표에 저장한다 (004_backtest_runs.sql).
+
+### 오늘의 인사이트 규칙
+- 명언: `quotes` 표(처음 열 때 `lib/quotes_data.py`의 초안을 넣음)에서 날짜를 씨앗으로 2개를 고른다. 최근 60일 안에 나온 명언, 같은 구루·같은 주제는 피한다. ‘명언 목록’ 탭에서 고치거나 끌 수 있다.
+- 해설: Secrets에 `ANTHROPIC_API_KEY`가 있으면 Claude가 내 자산군 비중·목표 차이·수익률과 오늘 시장 지표를 보고 쓴다. 없거나 실패하면 주제별 규칙 기반 해설.
+- 영상: ‘채널 관리’에 넣은 채널의 RSS(최근 15개)에서 30일 안 영상만 본다. 오늘 시장 상황(조정장, VIX, 금리·환율·금값 급변 등)과 내 보유 자산 관련 단어가 제목에 있으면 점수를 더하고, 이미 ‘봤어요’ 한 영상과 14일 안에 추천한 영상은 뺀다. ‘좋아요’ 누른 채널은 가산점. Claude가 있으면 상위 20개 후보 중 3개를 고르고 이유를 쓴다.
+- 앱을 열었을 때 오늘 것이 없으면 그 자리에서 만들고, GitHub Actions(`.github/workflows/daily-insight.yml`)가 매일 06:30(한국 시간)에 미리 만든다. 저장소 Settings → Secrets and variables → Actions에 `SUPABASE_URL`, `SUPABASE_KEY`(선택 `ANTHROPIC_API_KEY`)를 넣어야 동작한다. 매일 DB를 쓰므로 Supabase 무료 프로젝트 일시정지도 막아 준다.
 
 ## 테스트 (네트워크 없이)
 ```bash

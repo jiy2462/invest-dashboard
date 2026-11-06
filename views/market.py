@@ -126,6 +126,21 @@ with tab_view:
                         card(row["display_name"], row["symbol"], data.get(row["symbol"]),
                              is_rate=(group == "금리"), error=errors.get(row["symbol"]))
 
+    # 하단: 오늘의 명언 한 줄 미리보기 (오늘의 인사이트 화면이나 아침 예약 작업이 만들어 둔 것)
+    try:
+        from lib import insight
+
+        today_quotes = insight.daily_quotes(insight.today_kst())
+    except Exception:
+        today_quotes = []
+    st.divider()
+    st.markdown("**💡 오늘의 명언**")
+    if today_quotes:
+        for q in today_quotes:
+            st.markdown(f"“{q['quote_ko']}” — {q['guru']}")
+    else:
+        st.caption("‘오늘의 인사이트’ 화면을 열면 오늘의 명언 2개와 해설이 준비돼요.")
+
 with tab_edit:
     st.caption("표에서 바로 고치고 ‘저장’을 누르세요. 행을 지우면 지표가 삭제돼요. 금리 그룹은 등락을 bp로 보여줘요.")
     edited = st.data_editor(

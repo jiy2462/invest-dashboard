@@ -16,6 +16,8 @@ TABLES: dict[str, list[dict]] = {}
 def reset_db() -> None:
     TABLES.clear()
     AUTO_PRICES.clear()
+    FEEDS.clear()
+    PAGES.clear()
     rows = [("^GSPC", "S&P 500", "지수"), ("^KS11", "코스피", "지수"), ("KRW=X", "원/달러", "환율"),
             ("^TNX", "미국 10년물", "금리"), ("ecos:KR10Y", "한국 10년물", "금리")]
     TABLES["indicator_settings"] = [
@@ -24,7 +26,8 @@ def reset_db() -> None:
         for i, (s, n, g) in enumerate(rows)
     ]
     for t in ("assets", "watchlist", "chart_drawings", "accounts", "transactions", "target_allocation",
-              "cash_balances", "portfolio_snapshots", "app_settings", "fx_exchanges", "backtest_presets", "backtest_runs"):
+              "cash_balances", "portfolio_snapshots", "app_settings", "fx_exchanges", "backtest_presets", "backtest_runs",
+              "quotes", "daily_quotes", "youtube_channels", "videos", "daily_videos"):
         TABLES[t] = []
 
 
@@ -141,6 +144,7 @@ def install() -> None:
     import lib.backtest as backtest
     import lib.charting as charting
     import lib.indicators as indicators
+    import lib.insight as insight
     import lib.kr_rates as kr_rates
     import lib.market as market
     import lib.portfolio as portfolio
@@ -148,6 +152,9 @@ def install() -> None:
     import lib.watchlist as watchlist
 
     reset_db()
+    insight.get_client = lambda: FakeClient()
+    insight.fetch_feed = fake_feed
+    insight.fetch_page = fake_page
     indicators.get_client = watchlist.get_client = portfolio.get_client = backtest.get_client = lambda: FakeClient()
     backtest.fetch_history = fake_history
     backtest.fetch_fred_krw = lambda: fake_history(("DEXKOUS",))["DEXKOUS"]
@@ -188,3 +195,40 @@ def fake_history(tickers) -> dict[str, pd.Series]:
             vals = 100 * np.exp(np.cumsum(rng.normal(0.0003, 0.01, len(idx))))
         out[t] = pd.Series(vals, index=idx)
     return out
+
+
+# ── 유튜브 RSS (가짜) ───────────────────────────────────────
+FEEDS: dict[str, list[dict]] = {}   # 채널 ID → [{"id", "title", "days_ago", "desc"}]
+PAGES: dict[str, str] = {}          # 채널 페이지 주소 → HTML
+
+
+def feed_xml(channel_id: str, name: str, entries: list[dict], now: datetime | None = None) -> str:
+    from datetime import timedelta, timezone
+    from xml.sax.saxutils import escape
+
+    now = now or datetime.now(timezone.utc)
+    items = "".join(f"""
+  <entry>
+    <yt:videoId>{e['id']}</yt:videoId><yt:channelId>{channel_id}</yt:channelId>
+    <title>{escape(e['title'])}</title>
+    <published>{(now - timedelta(days=e.get('days_ago', 1))).isoformat()}</published>
+    <media:group><media:description>{escape(e.get('desc', ''))}</media:description>
+      <media:thumbnail url="https://i.ytimg.com/vi/{e['id']}/hqdefault.jpg" width="480" height="360"/></media:group>
+  </entry>""" for e in entries)
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/"
+      xmlns="http://www.w3.org/2005/Atom"><title>{name}</title>{items}
+</feed>"""
+
+
+def fake_feed(channel_id: str) -> str:
+    if channel_id not in FEEDS:
+        raise RuntimeError("404")
+    name, entries = FEEDS[channel_id]
+    return feed_xml(channel_id, name, entries)
+
+
+def fake_page(url: str) -> str:
+    if url not in PAGES:
+        raise RuntimeError("404")
+    return PAGES[url]
