@@ -7,10 +7,11 @@ import streamlit as st
 
 from lib import backtest as bt
 from lib import portfolio as pf
+from lib import ui
 
-UP, DOWN = "#d62728", "#1f5fbf"          # 한국식: 이익 빨강, 손실 파랑
-LINES = ["#2a78d6", "#e8743b", "#2ca58d"]
-BENCH = "#52514e"
+UP, DOWN = ui.UP, ui.DOWN              # 한국식: 이익 빨강, 손실 파랑
+LINES = [ui.BLUE, ui.ORANGE, ui.GREEN]
+BENCH = ui.GRAY
 DIRECT = "직접 입력 (티커)"
 MY = "내 목표 비중 (포트폴리오 화면)"
 SAVED = "저장: "
@@ -181,7 +182,7 @@ if saved_runs:
                 st.rerun()
 
 # ── 설정 ───────────────────────────────────────────────────
-with st.container(border=True):
+with ui.card("bt-settings"):
     c1, c2, c3, c4 = st.columns(4)
     start = c1.date_input("시작일", min_value=min_start, max_value=today, key="bt_start",
                           format="YYYY-MM-DD")
@@ -211,7 +212,7 @@ portfolios: list[bt.Portfolio] = []
 problems: list[str] = []
 cols = st.columns(n_slots)
 for i in range(n_slots):
-    with cols[i], st.container(border=True):
+    with cols[i], ui.card(f"bt-slot{i}"):
         st.selectbox("불러오기", choices, key=f"bt_pick{i}", on_change=load_slot, args=(i,))
         name = st.text_input("조합 이름", key=f"bt_name{i}")
         st.session_state[f"_bt_pick{i}"] = st.session_state[f"bt_pick{i}"]
@@ -392,7 +393,7 @@ with t1:
     inv = run.results[0].sim["invested"]
     if view != run.base:
         inv = inv / run.results[0].sim["value"] * run.results[0].other
-    fig.add_trace(go.Scatter(x=inv.index, y=inv, name="투자 원금", line=dict(color="#b9b8b2", width=1, dash="dash"),
+    fig.add_trace(go.Scatter(x=inv.index, y=inv, name="투자 원금", line=dict(color=ui.GRAY3, width=1, dash="dash"),
                              hovertemplate="%{y:,.0f}"))
     fig.update_layout(height=420, margin=dict(l=0, r=0, t=10, b=0), hovermode="x unified",
                       yaxis=dict(type="log" if log else "linear", tickformat=",.0f",

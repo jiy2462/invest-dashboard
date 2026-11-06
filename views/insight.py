@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from lib import insight as ins
+from lib import ui
 from lib.quotes_data import THEMES
 
 st.title("오늘의 인사이트")
@@ -32,8 +33,8 @@ def run_with_context(label: str, fn):
     st.rerun()
 
 
-def quote_card(q: dict) -> None:
-    with st.container(border=True):
+def quote_card(q: dict, key: str) -> None:
+    with ui.card(f"quote-{key}"):
         st.markdown(f"#### “{q['quote_ko']}”")
         if q.get("quote_original"):
             st.caption(q["quote_original"])
@@ -48,7 +49,7 @@ def quote_card(q: dict) -> None:
 
 
 def video_card(v: dict, d, key: str) -> None:
-    with st.container(border=True):
+    with ui.card(f"video-{key}"):
         c1, c2 = st.columns([1, 2])
         if v.get("thumbnail_url"):
             c1.image(v["thumbnail_url"], width="stretch")
@@ -80,8 +81,8 @@ with tab_today:
 
     st.subheader(f"오늘의 명언 · {today:%m월 %d일}")
     quotes = ins.daily_quotes(today)
-    for q in quotes:
-        quote_card(q)
+    for i, q in enumerate(quotes):
+        quote_card(q, f"t{i}")
     c1, c2, _ = st.columns([1, 1, 2])
     if c1.button("다른 명언 뽑기", key="reroll"):
         run_with_context("새 명언을 고르는 중…", lambda p, m: ins.make_quotes(today, p, m, reroll=True))
@@ -108,8 +109,8 @@ with tab_hist:
         st.caption("아직 지난 기록이 없어요. 내일부터 여기서 지난 명언과 추천을 다시 볼 수 있어요.")
     else:
         d = st.selectbox("날짜", past, format_func=lambda x: f"{x:%Y-%m-%d (%a)}")
-        for q in ins.daily_quotes(d):
-            quote_card(q)
+        for i, q in enumerate(ins.daily_quotes(d)):
+            quote_card(q, f"h{i}")
         for i, v in enumerate(ins.daily_videos(d)):
             video_card(v, d, f"h{i}")
 

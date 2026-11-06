@@ -1,5 +1,62 @@
-[theme]
-base = "light"
+# Apple(iOS) 느낌의 테마. 기기 설정에 따라 라이트/다크가 자동으로 바뀐다.
+# 화면별 세부 스타일(카드·탭·사이드바)은 lib/ui.py 의 CSS가 맡는다.
 
 [client]
 toolbarMode = "minimal"
+
+[theme]
+font = "Pretendard Variable:https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css, -apple-system, BlinkMacSystemFont, Apple SD Gothic Neo, sans-serif"
+headingFont = "Pretendard Variable, -apple-system, BlinkMacSystemFont, Apple SD Gothic Neo, sans-serif"
+headingFontSizes = ["2.125rem", "1.5rem", "1.25rem", "1.0625rem", "1rem", "0.875rem"]
+headingFontWeights = [700, 650, 600, 600, 600, 600]
+metricValueFontWeight = 650
+baseRadius = "0.75rem"
+buttonRadius = "full"
+showWidgetBorder = false
+showSidebarBorder = false
+
+[theme.light]
+primaryColor = "#007AFF"
+backgroundColor = "#F2F2F7"
+secondaryBackgroundColor = "#E9E9EF"
+textColor = "#1D1D1F"
+linkColor = "#007AFF"
+borderColor = "#D8D8DE"
+dataframeBorderColor = "#E5E5EA"
+dataframeHeaderBackgroundColor = "#F7F7FA"
+codeBackgroundColor = "#EDEDF2"
+redColor = "#FF3B30"
+orangeColor = "#FF9500"
+yellowColor = "#FFCC00"
+greenColor = "#34C759"
+blueColor = "#007AFF"
+violetColor = "#AF52DE"
+grayColor = "#8E8E93"
+chartCategoricalColors = ["#007AFF", "#FF9500", "#34C759", "#AF52DE", "#FF2D55", "#5AC8FA", "#FFCC00", "#5856D6", "#8E8E93"]
+
+[theme.light.sidebar]
+backgroundColor = "#FBFBFD"
+secondaryBackgroundColor = "#EFEFF4"
+
+[theme.dark]
+primaryColor = "#0A84FF"
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#2C2C2E"
+textColor = "#F5F5F7"
+linkColor = "#0A84FF"
+borderColor = "#38383A"
+dataframeBorderColor = "#2C2C2E"
+dataframeHeaderBackgroundColor = "#232325"
+codeBackgroundColor = "#2C2C2E"
+redColor = "#FF453A"
+orangeColor = "#FF9F0A"
+yellowColor = "#FFD60A"
+greenColor = "#30D158"
+blueColor = "#0A84FF"
+violetColor = "#BF5AF2"
+grayColor = "#8E8E93"
+chartCategoricalColors = ["#0A84FF", "#FF9F0A", "#30D158", "#BF5AF2", "#FF375F", "#64D2FF", "#FFD60A", "#5E5CE6", "#98989D"]
+
+[theme.dark.sidebar]
+backgroundColor = "#111113"
+secondaryBackgroundColor = "#2C2C2E"

@@ -7,8 +7,15 @@ import streamlit as st
 import yfinance as yf
 from plotly.subplots import make_subplots
 
-UP, DOWN = "#d62728", "#1f5fbf"
-MA_COLORS = {5: "#e53935", 20: "#f2b705", 50: "#2e9e44", 120: "#222222", 200: "#e754a6"}
+from lib import ui
+
+UP, DOWN = ui.UP, ui.DOWN
+# 5 빨강 · 20 노랑 · 50 초록 · 120 검정(다크 모드에선 흰색) · 200 분홍
+MA_COLORS = {5: ui.RED, 20: ui.YELLOW, 50: ui.GREEN, 120: "#1D1D1F", 200: ui.PINK}
+
+
+def ma_color(n: int) -> str:
+    return ui.ink() if n == 120 else MA_COLORS[n]
 INTERVALS = {"30분봉": "30m", "일봉": "1d", "주봉": "1wk", "월봉": "1mo"}
 PERIODS = {"1개월": 30, "3개월": 91, "6개월": 182, "1년": 365, "3년": 1095, "5년": 1826, "10년": 3652, "최대": None}
 
@@ -78,14 +85,14 @@ def build_figure(df: pd.DataFrame, interval: str, days: int | None, mas: list[in
     ), row=1, col=1)
     for n in mas:
         fig.add_trace(go.Scatter(x=df.index, y=df["Close"].rolling(n).mean(), mode="lines",
-                                 name=f"MA{n}", line=dict(color=MA_COLORS[n], width=1.2)), row=1, col=1)
+                                 name=f"MA{n}", line=dict(color=ma_color(n), width=1.3)), row=1, col=1)
     vol_colors = [UP if c >= o else DOWN for o, c in zip(df["Open"], df["Close"])]
     fig.add_trace(go.Bar(x=df.index, y=df["Volume"], marker_color=vol_colors, name="거래량",
-                         opacity=0.6, showlegend=False), row=2, col=1)
+                         opacity=0.5, showlegend=False), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=rsi(df["Close"]), mode="lines", name="RSI(14)",
-                             line=dict(color="#7b4fd6", width=1.2), showlegend=False), row=3, col=1)
+                             line=dict(color=ui.PURPLE, width=1.3), showlegend=False), row=3, col=1)
     for level in (30, 70):
-        fig.add_hline(y=level, line=dict(color="#999", width=0.8, dash="dot"), row=3, col=1)
+        fig.add_hline(y=level, line=dict(color=ui.GRAY, width=0.8, dash="dot"), row=3, col=1)
 
     x0, x1 = window(df, days)
     if x0 is not None:
@@ -106,10 +113,11 @@ def build_figure(df: pd.DataFrame, interval: str, days: int | None, mas: list[in
         fig.update_xaxes(rangebreaks=breaks)
     fig.update_yaxes(range=[0, 100], row=3, col=1, title_text="RSI")
     fig.update_layout(
-        title=dict(text=title, x=0, y=0.99, yanchor="top"), height=780, margin=dict(l=10, r=10, t=80, b=10),
+        title=dict(text=title, x=0, y=0.99, yanchor="top", font=dict(size=19)), height=780, margin=dict(l=10, r=10, t=80, b=10),
         xaxis_rangeslider_visible=False, hovermode="x unified", dragmode="pan",
         legend=dict(orientation="h", y=1.0, x=0, yanchor="bottom"),
-        newshape=dict(line=dict(color="#ff7f0e", width=2)),
+        newshape=dict(line=dict(color=ui.ORANGE, width=2)),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
 
@@ -118,14 +126,14 @@ def _draw(fig: go.Figure, df: pd.DataFrame, d: dict) -> None:
     pts = d["points"]
     if d["kind"] == "trendline" and len(pts) == 2:
         fig.add_shape(type="line", x0=pts[0]["t"], y0=pts[0]["p"], x1=pts[1]["t"], y1=pts[1]["p"],
-                      line=dict(color="#ff7f0e", width=2), row=1, col=1)
+                      line=dict(color=ui.ORANGE, width=2), row=1, col=1)
         if d.get("text"):
             fig.add_annotation(x=pts[1]["t"], y=pts[1]["p"], text=d["text"], showarrow=False,
-                               yshift=12, font=dict(color="#ff7f0e"), row=1, col=1)
+                               yshift=12, font=dict(color=ui.ORANGE), row=1, col=1)
     elif d["kind"] == "text" and pts:
         fig.add_annotation(x=pts[0]["t"], y=pts[0]["p"], text=d.get("text") or "", showarrow=True,
-                           arrowhead=2, ax=0, ay=-40, bgcolor="rgba(255,255,255,0.85)",
-                           bordercolor="#888", row=1, col=1)
+                           arrowhead=2, ax=0, ay=-40, bgcolor=ui.tok("card"),
+                           bordercolor=ui.GRAY3, borderpad=4, font=dict(color=ui.ink()), row=1, col=1)
     elif d["kind"] == "measure" and len(pts) == 2:
         p0, p1 = close_at(df, pts[0]["t"]), close_at(df, pts[1]["t"])
         if p0 is None or p1 is None:
