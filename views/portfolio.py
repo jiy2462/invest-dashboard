@@ -6,11 +6,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from lib import portfolio as pf
+from lib import ui
 from lib import symbols
 from lib import market
 
-UP, DOWN = "#d62728", "#1f5fbf"          # 한국식: 이익 빨강, 손실 파랑
-BAR, INK, MUTED = "#2a78d6", "#52514e", "#b9b8b2"
+UP, DOWN = ui.UP, ui.DOWN              # 한국식: 이익 빨강, 손실 파랑
+BAR, INK, MUTED = ui.BLUE, ui.ink(), ui.GRAY3
 CURRENCIES = ["KRW", "USD", "JPY", "EUR", "CNY", "HKD"]
 MANUAL = "MANUAL:"                       # 티커 없는 자산(예: KRX 금현물)의 티커 앞머리
 NEW_SEARCH, NEW_MANUAL = "__search__", "__manual__"
@@ -52,8 +53,8 @@ def won(v: float) -> str:
 
 
 # 범주 색 (고정 순서, 순환하지 않음). 8번째부터는 ‘기타’로 묶는다.
-PIE_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]
-OTHER_COLOR = "#b9b8b2"
+PIE_COLORS = [ui.BLUE, ui.ORANGE, ui.GREEN, ui.PURPLE, ui.PINK, ui.TEAL, ui.YELLOW]
+OTHER_COLOR = ui.GRAY3
 
 
 def donut(parts: pd.DataFrame, total: float) -> go.Figure:
@@ -67,7 +68,7 @@ def donut(parts: pd.DataFrame, total: float) -> go.Figure:
         colors = PIE_COLORS[:len(parts) - 1] + [OTHER_COLOR]
     fig = go.Figure(go.Pie(
         labels=parts["label"], values=parts["value"], hole=0.58, sort=False, direction="clockwise",
-        marker=dict(colors=colors, line=dict(color="rgba(255,255,255,0.9)", width=2)),
+        marker=dict(colors=colors, line=dict(color=ui.tok("bg"), width=2)),
         textinfo="label+percent", textposition="outside", texttemplate="%{label}<br>%{percent:.1%}",
         textfont=dict(size=12), outsidetextfont=dict(size=12), automargin=True,
         hovertemplate="%{label}<br>₩%{value:,.0f} · %{percent:.1%}<extra></extra>",

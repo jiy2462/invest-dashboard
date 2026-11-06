@@ -2,11 +2,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from lib import indicators, market_hours
-from lib.charting import MA_COLORS
+from lib import indicators, market_hours, ui
+from lib.charting import ma_color
 from lib.market import clear_cache, load_ohlc, summarize, validate_yf_symbol
 
-UP, DOWN, FLAT = "#d62728", "#1f5fbf", "#888888"  # 한국식: 상승 빨강, 하락 파랑
+UP, DOWN, FLAT = ui.UP, ui.DOWN, ui.FLAT  # 한국식: 상승 빨강, 하락 파랑
 
 st.title("오늘의 시장")
 
@@ -41,13 +41,13 @@ def mini_chart(df: pd.DataFrame, candles: bool) -> go.Figure:
             hoverinfo="x+y",
         ))
     else:  # 종가만 있는 지표 (한국 금리)
-        fig.add_trace(go.Scatter(x=x, y=view["Close"], mode="lines", line=dict(color="#555", width=1.4),
+        fig.add_trace(go.Scatter(x=x, y=view["Close"], mode="lines", line=dict(color=ui.BLUE, width=1.6),
                                  name="", hovertemplate="%{x} %{y:,.3f}<extra></extra>"))
     for n, ma in mas.items():
         m = ma[ma.index >= cutoff]
         if m.notna().any():
             fig.add_trace(go.Scatter(x=x, y=m.values, mode="lines", name=f"{n}일선",
-                                     line=dict(color=MA_COLORS[n], width=1.2),
+                                     line=dict(color=ma_color(n), width=1.2),
                                      hovertemplate=f"{n}일선 %{{y:,.2f}}<extra></extra>"))
     fig.update_layout(height=150, margin=dict(l=0, r=0, t=0, b=0), showlegend=False,
                       xaxis=dict(visible=False, type="category", rangeslider=dict(visible=False)),
@@ -65,12 +65,12 @@ def ma_legend(df: pd.DataFrame) -> str:
             continue
         ma = float(df["Close"].rolling(n).mean().iloc[-1])
         pos = "위" if last >= ma else "아래"
-        parts.append(f"<span style='white-space:nowrap'><span style='color:{MA_COLORS[n]}'>━</span> {n}일 {pos}</span>")
+        parts.append(f"<span style='white-space:nowrap'><span style='color:{ma_color(n)}'>━</span> {n}일 {pos}</span>")
     return " &nbsp;".join(parts)
 
 
 def card(name: str, symbol: str, df: pd.DataFrame | None, is_rate: bool, error: str | None) -> None:
-    with st.container(border=True):
+    with ui.card(f"mkt-{symbol}"):
         if df is None or df.empty:
             st.markdown(f"**{name}**")
             st.caption(error or f"`{symbol}` 시세를 못 받았어요")
@@ -79,17 +79,12 @@ def card(name: str, symbol: str, df: pd.DataFrame | None, is_rate: bool, error: 
         color = UP if s["change"] > 0 else DOWN if s["change"] < 0 else FLAT
         arrow = "▲" if s["change"] > 0 else "▼" if s["change"] < 0 else "–"
         delta = f"{arrow} {abs(s['bp']):.1f}bp" if is_rate else f"{arrow} {abs(s['pct']):.2f}%"
-        st.markdown(
-            f"<div style='font-size:0.85rem;opacity:.75'>{name}</div>"
-            f"<div style='font-size:1.4rem;font-weight:600'>{fmt_value(s['last'], is_rate)}</div>"
-            f"<div style='color:{color};font-size:0.9rem'>{delta}</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown(ui.stat(name, fmt_value(s['last'], is_rate), delta, color), unsafe_allow_html=True)
         has_ohlc = not (df["High"] == df["Low"]).all()
         st.plotly_chart(mini_chart(df, candles=has_ohlc), width="stretch",
                         config={"displayModeBar": False, "scrollZoom": False}, key=f"mini-{symbol}")
         legend = ma_legend(df)
-        st.markdown(f"<div style='font-size:0.75rem;opacity:.8'>{legend}</div>" if legend else "",
+        st.markdown(f"<div class='ios-legend'>{legend}</div>" if legend else "",
                     unsafe_allow_html=True)
         st.caption(f"{s['asof']:%Y-%m-%d} 기준 · {market_hours.status(symbol)}")
 
