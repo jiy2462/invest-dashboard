@@ -1,4 +1,4 @@
-"""시세 데이터 불러오기: yfinance(지수·환율·원자재·코인 등)와 한국은행 ECOS(한국 금리)."""
+"""시세 데이터 불러오기: yfinance(지수·환율·원자재·코인 등), 한국 금리는 네이버 금융 → 한국은행 ECOS 순서."""
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -7,6 +7,8 @@ import pandas as pd
 import requests
 import streamlit as st
 import yfinance as yf
+
+from lib import kr_rates
 
 # ECOS 시장금리(일별) 통계표 817Y002의 항목 코드
 ECOS_SERIES = {
@@ -113,15 +115,26 @@ def load_series(settings: list[dict]) -> tuple[dict[str, pd.Series], dict[str, s
         if s["source"] != "ecos":
             continue
         sym = s["symbol"]
-        if sym not in ECOS_SERIES:
-            errors[sym] = f"`{sym}`은 아직 지원하지 않는 ECOS 지표예요"
-        elif not key:
-            errors[sym] = "Secrets에 ECOS_API_KEY가 없어요"
-        else:
+        if sym not in ECOS_SERIES and sym not in kr_rates.SUPPORTED:
+            errors[sym] = f"`{sym}`은 아직 지원하지 않는 한국 금리 지표예요"
+            continue
+        reasons = []
+        # 1) 네이버 금융 (해외 서버에서도 열리는 편)
+        try:
+            out[sym] = kr_rates.fetch(sym)
+            continue
+        except kr_rates.KrRateError as e:
+            reasons.append(str(e))
+        # 2) 한국은행 ECOS (키가 있을 때)
+        if key and sym in ECOS_SERIES:
             try:
                 out[sym] = fetch_ecos(sym, key)
+                continue
             except EcosError as e:
-                errors[sym] = str(e)
+                reasons.append(str(e))
+        elif not key:
+            reasons.append("ECOS_API_KEY 없음")
+        errors[sym] = "못 받았어요: " + " / ".join(reasons)
     return out, errors
 
 

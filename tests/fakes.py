@@ -137,6 +137,7 @@ def install() -> None:
     """앱 모듈의 네트워크 함수를 가짜로 바꾼다."""
     import lib.charting as charting
     import lib.indicators as indicators
+    import lib.kr_rates as kr_rates
     import lib.market as market
     import lib.portfolio as portfolio
     import lib.symbols as symbols
@@ -147,6 +148,11 @@ def install() -> None:
     market.fetch_yf_closes = fake_closes
     market.validate_yf_symbol = lambda s: s in BASE
     charting.fetch_ohlcv = fake_ohlcv
+
+    def no_kr_rates(symbol):
+        raise kr_rates.KrRateError("네이버 테스트: 접속 안 함")
+
+    kr_rates.fetch = no_kr_rates
     symbols.krx_listing = lambda: KRX
     symbols.yf_search = lambda q: [{"symbol": "AAPL", "name": "Apple Inc.", "market": "NASDAQ"}] if "app" in q.lower() else []
     symbols.currency_for = lambda s: "KRW" if s.endswith(".KS") else "USD"
