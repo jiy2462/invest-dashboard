@@ -332,3 +332,26 @@ def test_fx_tab_add_and_show():
     r = fakes.TABLES["fx_exchanges"][-1]
     assert (r["side"], r["currency"], r["amount"], r["rate"], r["memo"]) == ("buy", "USD", 700, 1430, "목표환율 도달")
     assert any(m.label == "평균 환전 환율" and m.value == "1,430.00" for m in at.metric)
+
+
+def test_strategy_memo_merged_and_editable():
+    seed()
+    t = pf.list_targets().set_index("asset_class")
+    assert t.loc["S&P 500", "strategy"] == "ISA 위주\n\n적립식"     # 현황 + 전략 → 전략 하나로
+    at = run("portfolio")
+    assert not at.exception
+    at.text_area(key="memo-S&P 500").set_value("적립식 유지").run()
+    at.button(key="memo-save-S&P 500").click().run()
+    row = next(r for r in fakes.TABLES["target_allocation"] if r["asset_class"] == "S&P 500")
+    assert (row["strategy"], row["status_note"]) == ("적립식 유지", None)
+
+    at.selectbox(key="memo-new-class").set_value("금")
+    at.text_area(key="memo-new-text").set_value("10% 하락 시 추가 매수").run()
+    at.button(key="memo-add").click().run()
+    assert next(r for r in fakes.TABLES["target_allocation"] if r["asset_class"] == "금")["strategy"] == \
+        "10% 하락 시 추가 매수"
+
+    at.button(key="memo-del-S&P 500").click().run()
+    assert not at.exception
+    row = next(r for r in fakes.TABLES["target_allocation"] if r["asset_class"] == "S&P 500")
+    assert row["strategy"] is None and row["target_weight"] == 60   # 메모만 지우고 자산군은 남김
