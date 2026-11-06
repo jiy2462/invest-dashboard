@@ -25,7 +25,7 @@ streamlit run app.py
 `?t=`가 붙은 주소를 남에게 주면 그 사람도 들어올 수 있으니 공유하지 말 것. 비밀번호를 바꾸면 기존 로그인은 모두 풀린다.
 
 ## DB
-Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL을 번호 순서대로 적용한다 (`001_init.sql` → `002_portfolio.sql` → `003_fx_exchanges.sql`).
+Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL을 번호 순서대로 적용한다 (`001_init.sql` → `002_portfolio.sql` → `003_fx_exchanges.sql` → `004_backtest_runs.sql`).
 
 ### 포트폴리오 계산 규칙
 - 평단은 이동평균법: 매도해도 평단은 그대로, 차액은 실현손익.
@@ -41,6 +41,7 @@ Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴�
 - CAGR·변동성·MDD·샤프는 적립금 영향을 뺀 수익 지수로, IRR은 실제 현금흐름으로 계산한다.
 - '원금 손실 → 원금 회복'은 평가금액이 누적 투자금보다 적어진 날부터 다시 넘어선 날까지의 가장 긴 기간(개월).
 - 조합은 `backtest_presets` 표에 저장한다 (001_init.sql에 이미 있음).
+- 실행 결과(고른 옵션 + 지표 + 주 단위 곡선)는 `backtest_runs` 표에 저장한다 (004_backtest_runs.sql).
 
 ## 테스트 (네트워크 없이)
 ```bash
