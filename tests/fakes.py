@@ -29,7 +29,8 @@ def reset_db() -> None:
     ]
     for t in ("assets", "watchlist", "chart_drawings", "accounts", "transactions", "target_allocation",
               "cash_balances", "portfolio_snapshots", "app_settings", "fx_exchanges", "backtest_presets", "backtest_runs",
-              "quotes", "daily_quotes", "youtube_channels", "videos", "daily_videos", "trade_inbox"):
+              "quotes", "daily_quotes", "youtube_channels", "videos", "daily_videos", "trade_inbox",
+              "card_expenses"):
         TABLES[t] = []
 
 
@@ -178,6 +179,7 @@ def install() -> None:
     import lib.market as market
     import lib.portfolio as portfolio
     import lib.symbols as symbols
+    import lib.spending as spending
     import lib.trade_inbox as trade_inbox
     import lib.watchlist as watchlist
 
@@ -187,7 +189,7 @@ def install() -> None:
     insight.fetch_page = fake_page
     insight.yt_get = fake_yt_get
     indicators.get_client = watchlist.get_client = portfolio.get_client = backtest.get_client = \
-        trade_inbox.get_client = lambda: FakeClient()
+        trade_inbox.get_client = spending.get_client = lambda: FakeClient()
     backtest.fetch_history = fake_history
     backtest.fetch_fred_krw = lambda: fake_history(("DEXKOUS",))["DEXKOUS"]
     market.fetch_yf_closes = fake_closes
