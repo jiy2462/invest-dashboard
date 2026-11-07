@@ -48,12 +48,26 @@ def quote_card(q: dict, key: str) -> None:
             st.caption("해설: Claude")
 
 
+try:
+    OPEN_IN = ins.open_in()
+except Exception:
+    OPEN_IN = "default"
+try:
+    UA = st.context.headers.get("User-Agent") or ""
+except Exception:
+    UA = ""
+
+
+def link(video_id: str) -> str:
+    return ins.video_url(video_id, OPEN_IN, UA)
+
+
 def video_card(v: dict, d, key: str) -> None:
     with ui.card(f"video-{key}"):
         c1, c2 = st.columns([1, 2])
         if v.get("thumbnail_url"):
             c1.image(v["thumbnail_url"], width="stretch")
-        url = f"https://www.youtube.com/watch?v={v['video_id']}"
+        url = link(v["video_id"])
         c2.markdown(f"**[{v['title']}]({url})**")
         pub = str(v.get("published_at") or "")[:10]
         c2.caption(f"{v.get('channel_name') or ''} · {pub}")
@@ -71,7 +85,7 @@ def video_card(v: dict, d, key: str) -> None:
 def video_list(vs: list[dict]) -> None:
     """소개 문장 없는 새 영상: 한 줄씩."""
     for v in vs:
-        url = f"https://www.youtube.com/watch?v={v['video_id']}"
+        url = link(v["video_id"])
         pub = str(v.get("published_at") or "")[:10]
         st.markdown(f"- [{v['title']}]({url})  \n  <span style='color:{ui.tok('muted')}'>"
                     f"{v.get('channel_name') or ''} · {pub}</span>", unsafe_allow_html=True)
@@ -186,6 +200,14 @@ with tab_ch:
                     for cid, n in pick:
                         ins.add_channel(cid, n)
                     st.rerun()
+
+    brave = st.toggle("영상 링크를 Brave 앱으로 열기", value=OPEN_IN == "brave", key="open-brave",
+                      help="휴대폰(iPhone·Android)에서 영상 제목을 누르면 Brave 앱에서 열려요. "
+                           "Brave가 없는 Android는 원래 브라우저로 열려요. 컴퓨터에서는 브라우저를 고를 수 없어서, "
+                           "대시보드를 Brave에서 열면 영상도 Brave에서 열려요.")
+    if brave != (OPEN_IN == "brave"):
+        ins.set_open_in("brave" if brave else "default")
+        st.rerun()
 
     if channels:
         st.markdown(f"**채널 {len(channels)}개**")

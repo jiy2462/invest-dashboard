@@ -400,3 +400,31 @@ def test_insight_page_with_api_key_shows_both_sections(monkeypatch):
     assert len([b for b in at.button if (b.key or "").startswith("w-tn")]) == ins.NEW_CARDS
     assert any("더 보기" in e.label for e in at.expander)
     assert not any("YOUTUBE_API_KEY" in c.value for c in at.caption)
+
+
+def test_video_url_brave_by_device():
+    ios = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15"
+    android = "Mozilla/5.0 (Linux; Android 15; SM-S928N) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36"
+    mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/130 Safari/537.36"
+    plain = "https://www.youtube.com/watch?v=abc"
+    assert ins.video_url("abc", "brave", ios) == "brave://open-url?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dabc"
+    a = ins.video_url("abc", "brave", android)
+    assert a.startswith("intent://www.youtube.com/watch?v=abc#Intent;scheme=https;package=com.brave.browser;")
+    assert "S.browser_fallback_url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dabc" in a and a.endswith(";end")
+    assert ins.video_url("abc", "brave", mac) == plain
+    assert ins.video_url("abc", "default", ios) == plain
+    assert ins.open_in() == "brave"                 # 기본값: Brave
+    ins.set_open_in("default")
+    assert ins.open_in() == "default"
+
+
+def test_insight_page_brave_toggle():
+    add_feeds()
+    ins.add_channel(CH1, "A")
+    at = run("insight")
+    assert not at.exception
+    t = at.toggle(key="open-brave")
+    assert t.value is True
+    t.set_value(False).run()
+    assert not at.exception
+    assert ins.open_in() == "default"

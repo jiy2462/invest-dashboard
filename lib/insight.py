@@ -21,6 +21,7 @@ import re
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -359,6 +360,44 @@ def refresh_feeds(channels: list[dict]) -> tuple[int, list[str]]:
     if collected:
         upsert_videos(collected)
     return len(collected), errors
+
+
+# ── 영상 링크 (Brave로 열기) ────────────────────────────────
+
+OPEN_IN_KEY = "video_open_in"     # app_settings: "brave" | "default"
+
+
+def open_in() -> str:
+    rows = _db().table("app_settings").select("*").eq("key", OPEN_IN_KEY).execute().data or []
+    return (rows[0].get("value") if rows else None) or "brave"
+
+
+def set_open_in(value: str) -> None:
+    _db().table("app_settings").upsert({"key": OPEN_IN_KEY, "value": value}, on_conflict="key").execute()
+
+
+def device_of(user_agent: str | None) -> str:
+    ua = (user_agent or "").lower()
+    if "iphone" in ua or "ipad" in ua or "ipod" in ua:
+        return "ios"
+    if "android" in ua:
+        return "android"
+    return "desktop"
+
+
+def video_url(video_id: str, mode: str = "default", user_agent: str | None = None) -> str:
+    """영상 주소. mode='brave'면 휴대폰에서 Brave 앱으로 여는 주소를 준다.
+    iOS: brave://open-url, Android: intent(Brave가 없으면 원래 주소로). 컴퓨터는 앱을 지정할 수 없어 원래 주소."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    if mode != "brave":
+        return url
+    dev = device_of(user_agent)
+    if dev == "ios":
+        return "brave://open-url?url=" + quote(url, safe="")
+    if dev == "android":
+        return (f"intent://www.youtube.com/watch?v={video_id}#Intent;scheme=https;package=com.brave.browser;"
+                f"S.browser_fallback_url={quote(url, safe='')};end")
+    return url
 
 
 # ── YouTube Data API (채널 전체 영상) ───────────────────────
