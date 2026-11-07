@@ -2,7 +2,8 @@
 // 아이폰 단축어(iOS 27 '알림' 자동화)가 알림 내용을 POST로 보내면 trade_inbox 표에 원문 그대로 쌓는다.
 // 인증: Supabase 로그인(JWT) 대신 전송용 비밀번호(Edge Function 시크릿 INBOX_TOKEN)를 확인한다.
 //   헤더 `x-inbox-token: <비밀번호>` 또는 주소 끝 `?token=<비밀번호>` 또는 JSON의 "token".
-// 본문: JSON {"source": "kis", "title": "...", "body": "..."} / 폼 / 그냥 글자 모두 받는다.
+// 회사: JSON "source" 또는 주소 끝 `&source=upbit|kis|meritz|nh` (없으면 내용으로 짐작).
+// 본문: JSON {"title": "...", "subtitle": "...", "body": "..."} / 폼 / 그냥 글자 모두 받는다.
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const SOURCES: [RegExp, string][] = [
@@ -59,10 +60,12 @@ Deno.serve(async (req: Request) => {
   if (!expected || given !== expected) return reply(401, { ok: false, error: "비밀번호가 맞지 않아요." });
 
   const title = str(data.title).trim();
-  const body = str(data.body ?? data.text ?? data.message ?? data.content).trim();
+  const subtitle = str(data.subtitle).trim();
+  const main = str(data.body ?? data.text ?? data.message ?? data.content).trim();
+  const body = [subtitle, main].filter(Boolean).join("\n");
   if (!body && !title) return reply(400, { ok: false, error: "알림 내용이 비어 있어요." });
   const app = str(data.app).trim();
-  const given_source = str(data.source).trim().toLowerCase();
+  const given_source = str(data.source ?? url.searchParams.get("source")).trim().toLowerCase();
   const source = ["upbit", "kis", "meritz", "nh"].includes(given_source)
     ? given_source
     : detectSource(given_source, app, title, body);
