@@ -8,6 +8,7 @@ Streamlit + Supabase로 만든 개인 투자 대시보드. 설계 문서: https:
 3. 포트폴리오 — 거래 입력, 보유 현황, 리밸런싱
 4. 백테스트 — 자산군 조합, 최대 30년
 5. 오늘의 인사이트 — 구루 명언 2개, 유튜브 추천
+6. 지출관리 — 신한·현대카드 결제 알림(아이폰 단축어 → Edge Function `card-inbox`)을 모아 확인 체크
 
 ## 로컬 실행
 ```bash
@@ -25,7 +26,7 @@ streamlit run app.py
 `?t=`가 붙은 주소를 남에게 주면 그 사람도 들어올 수 있으니 공유하지 말 것. 비밀번호를 바꾸면 기존 로그인은 모두 풀린다.
 
 ## DB
-Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL을 번호 순서대로 적용한다 (`001_init.sql` → `002_portfolio.sql` → `003_fx_exchanges.sql` → `004_backtest_runs.sql` → `005_insight.sql` → `006_trade_inbox.sql`).
+Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL을 번호 순서대로 적용한다 (`001_init.sql` → `002_portfolio.sql` → `003_fx_exchanges.sql` → `004_backtest_runs.sql` → `005_insight.sql` → `006_trade_inbox.sql` → `007_card_expenses.sql`).
 
 ### 포트폴리오 계산 규칙
 - 평단은 이동평균법: 매도해도 평단은 그대로, 차액은 실현손익.

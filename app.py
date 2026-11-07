@@ -14,6 +14,7 @@ pages = [
     st.Page("views/portfolio.py", title="포트폴리오", icon=":material/donut_large:"),
     st.Page("views/backtest.py", title="백테스트", icon=":material/history:"),
     st.Page("views/insight.py", title="오늘의 인사이트", icon=":material/lightbulb:"),
+    st.Page("views/spending.py", title="지출관리", icon=":material/receipt_long:"),
 ]
 
 nav = st.navigation(pages)
