@@ -25,7 +25,7 @@ streamlit run app.py
 `?t=`가 붙은 주소를 남에게 주면 그 사람도 들어올 수 있으니 공유하지 말 것. 비밀번호를 바꾸면 기존 로그인은 모두 풀린다.
 
 ## DB
-Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL을 번호 순서대로 적용한다 (`001_init.sql` → `002_portfolio.sql` → `003_fx_exchanges.sql` → `004_backtest_runs.sql` → `005_insight.sql`).
+Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴더의 SQL을 번호 순서대로 적용한다 (`001_init.sql` → `002_portfolio.sql` → `003_fx_exchanges.sql` → `004_backtest_runs.sql` → `005_insight.sql` → `006_trade_inbox.sql`).
 
 ### 포트폴리오 계산 규칙
 - 평단은 이동평균법: 매도해도 평단은 그대로, 차액은 실현손익.
@@ -52,6 +52,12 @@ Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴�
   - 새 영상: 최근 14일 안에 올라온 영상(‘봤어요’ 한 것 제외). 관련도 높은 6개는 소개 문장(Claude 또는 단어 기반)과 함께 카드로, 나머지(최대 24개)는 목록으로 보여 준다. `daily_videos.made_by = 'new'`로 구분한다.
   - ‘좋아요’ 누른 채널은 가산점.
 - 앱을 열었을 때 오늘 것이 없으면 그 자리에서 만들고, GitHub Actions(`.github/workflows/daily-insight.yml`)가 매일 06:30(한국 시간)에 미리 만든다. 저장소 Settings → Secrets and variables → Actions에 `SUPABASE_URL`, `SUPABASE_KEY`(선택 `ANTHROPIC_API_KEY`, `YOUTUBE_API_KEY`)를 넣어야 동작한다. 매일 DB를 쓰므로 Supabase 무료 프로젝트 일시정지도 막아 준다.
+
+### 체결·배당 알림 대기함
+- 아이폰 단축어(iOS 27 '알림' 개인 자동화)가 업비트 앱 알림, 카카오톡 알림(한국투자증권·메리츠증권·NH투자증권)을 받으면 알림 내용을 Edge Function `trade-inbox`(`supabase/functions/trade-inbox`)로 POST한다.
+- 함수는 Edge Function 시크릿 `INBOX_TOKEN`(전송용 비밀번호)을 헤더 `x-inbox-token`으로 확인하고, `trade_inbox` 표에 원문을 쌓는다. 같은 회사·같은 내용이 10분 안에 또 오면 한 번만 저장. JWT 확인은 끔(`verify_jwt=false`).
+- 본문은 JSON `{"source": "upbit|kis|meritz|nh", "title": "...", "body": "..."}`. `source`가 없으면 제목·내용으로 회사를 짐작한다.
+- 포트폴리오 → ‘알림 대기함’ 탭에서 `lib/trade_inbox.py`의 읽기 규칙이 구분·종목·수량·단가·날짜·계좌를 미리 채우고, 사람이 확인해 [거래내역에 넣기]를 눌러야 `transactions`에 들어간다(메모 ‘알림 자동 입력’).
 
 ## 테스트 (네트워크 없이)
 ```bash
