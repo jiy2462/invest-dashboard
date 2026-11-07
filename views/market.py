@@ -157,6 +157,49 @@ def card(name: str, symbol: str, df: pd.DataFrame | None, is_rate: bool, error: 
         st.caption(f"{s['asof']:%Y-%m-%d} 기준 · {market_hours.status(symbol)}")
 
 
+SORT_CSS = """
+.sortable-component { display: flex; flex-direction: column; gap: 6px; font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', sans-serif; }
+.sortable-container { width: 100%; box-sizing: border-box; min-height: 48px; background: #F2F2F7; border-radius: 14px; padding: 6px; margin-bottom: 8px; }
+.sortable-container-header { font-weight: 600; font-size: 14px; padding: 4px 8px; color: #1D1D1F; }
+.sortable-item, .sortable-item:hover {
+  background: #FFFFFF; color: #1D1D1F; border: none; border-radius: 10px; padding: 10px 12px;
+  margin: 3px 0; font-size: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); touch-action: manipulation;
+}
+"""
+
+
+def order_editor(visible: list[dict]) -> None:
+    """카테고리 순서와 카테고리 안 지표 순서를 끌어서 바꾼다 (휴대폰은 길게 누른 뒤 끌기)."""
+    from streamlit_sortables import sort_items
+
+    groups: dict[str, list[str]] = {}
+    for row in visible:
+        groups.setdefault(row["group_name"] or "기타", []).append(indicators.order_label(row))
+    with ui.card("mkt-order"):
+        st.markdown("**① 카테고리 순서**")
+        st.caption("위아래로 끌어서 옮겨요. 휴대폰은 항목을 길게 누른 뒤 끌어요.")
+        group_order = sort_items(list(groups), direction="vertical", custom_style=SORT_CSS, key="sort-groups")
+        group_order = [g for g in group_order if g in groups] + [g for g in groups if g not in group_order]
+        st.markdown("**② 카테고리 안 지표 순서**")
+        st.caption("다른 카테고리로 끌어다 놓으면 그 카테고리로 옮겨져요.")
+        containers = [{"header": g, "items": groups[g]} for g in group_order]
+        result = sort_items(containers, multi_containers=True, direction="vertical", custom_style=SORT_CSS,
+                            key="sort-items-" + "|".join(group_order))
+        with st.container(horizontal=True, gap="small"):
+            st.button("순서 저장", type="primary", key="save-order", on_click=_save_order, args=(result or containers,))
+            st.button("취소", key="cancel-order", on_click=_close_order)
+
+
+def _close_order() -> None:
+    st.session_state["mkt-reorder"] = False
+
+
+def _save_order(containers: list[dict]) -> None:
+    indicators.save_order(indicators.reorder_plan(settings_df.to_dict("records"), containers))
+    _close_order()
+    st.toast("순서를 저장했어요.")
+
+
 try:
     settings_df = indicators.load_all()
 except Exception:
@@ -172,10 +215,15 @@ with tab_view:
     else:
         with st.spinner("시세를 불러오는 중…"):
             data, errors = load_ohlc(visible)
-        if st.button("새로고침", help="열린 장은 5분마다, 닫힌 장은 마감 뒤 한 번만 새로 받아요. 누르면 모두 다시 받아요."):
-            clear_cache()
-            st.cache_data.clear()
-            st.rerun()
+        with st.container(horizontal=True, gap="medium", vertical_alignment="center"):
+            if st.button("새로고침", help="열린 장은 5분마다, 닫힌 장은 마감 뒤 한 번만 새로 받아요. 누르면 모두 다시 받아요."):
+                clear_cache()
+                st.cache_data.clear()
+                st.rerun()
+            reorder = st.toggle("순서 바꾸기", key="mkt-reorder",
+                                help="카테고리와 지표를 끌어서 위아래로 옮겨요. 휴대폰은 길게 누른 뒤 끌어요.")
+        if reorder:
+            order_editor(visible)
         groups: dict[str, list[dict]] = {}
         for row in visible:
             groups.setdefault(row["group_name"] or "기타", []).append(row)
