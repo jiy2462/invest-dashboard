@@ -7,3 +7,4 @@ finance-datareader>=0.9.90
 requests>=2.32
 anthropic>=2.6
 fear-and-greed>=0.4
+streamlit-sortables>=0.3.1
