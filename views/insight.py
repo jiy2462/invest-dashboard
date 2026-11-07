@@ -68,6 +68,36 @@ def video_card(v: dict, d, key: str) -> None:
             st.rerun()
 
 
+def video_list(vs: list[dict]) -> None:
+    """소개 문장 없는 새 영상: 한 줄씩."""
+    for v in vs:
+        url = f"https://www.youtube.com/watch?v={v['video_id']}"
+        pub = str(v.get("published_at") or "")[:10]
+        st.markdown(f"- [{v['title']}]({url})  \n  <span style='color:{ui.tok('muted')}'>"
+                    f"{v.get('channel_name') or ''} · {pub}</span>", unsafe_allow_html=True)
+
+
+def video_sections(vids: list[dict], d, prefix: str, empty_pick: str) -> None:
+    picks = [v for v in vids if v.get("kind") != "new"]
+    new = [v for v in vids if v.get("kind") == "new"]
+    st.markdown("##### 채널 전체 영상에서 고른 4개")
+    if not picks:
+        st.caption(empty_pick)
+    for i, v in enumerate(picks):
+        video_card(v, d, f"{prefix}p{i}")
+    st.markdown(f"##### 새로 올라온 영상 · 최근 {ins.NEW_VIDEO_DAYS}일")
+    if not new:
+        st.caption(f"최근 {ins.NEW_VIDEO_DAYS}일 안에 올라온 새 영상이 없어요.")
+    cards = [v for v in new if v.get("reason")]
+    rest = [v for v in new if not v.get("reason")]
+    for i, v in enumerate(cards):
+        video_card(v, d, f"{prefix}n{i}")
+    if rest:
+        with ui.card(f"newlist-{prefix}"):
+            with st.expander(f"새 영상 {len(rest)}개 더 보기"):
+                video_list(rest)
+
+
 tab_today, tab_hist, tab_ch, tab_q = st.tabs(["오늘", "지난 기록", "채널 관리", "명언 목록"])
 
 with tab_today:
@@ -94,13 +124,15 @@ with tab_today:
     if not active:
         st.info("추천에 쓸 유튜브 채널이 아직 없어요. ‘채널 관리’ 탭에서 구독 중인 경제 채널을 넣어 주세요.")
     else:
-        vids = ins.daily_videos(today)
-        if not vids:
-            st.caption("오늘 추천할 새 영상을 찾지 못했어요.")
-        for i, v in enumerate(vids):
-            video_card(v, today, f"t{i}")
+        if ins.youtube_api_key():
+            st.caption("구독 채널의 모든 영상 중에서 지금 시장에 맞는 영상과 무작위로 고른 영상을 섞어 추천해요.")
+        else:
+            st.caption("지금은 채널 RSS로 모은 영상(채널마다 최신 15개, 매일 쌓여요) 중에서 골라요. "
+                       "Secrets에 `YOUTUBE_API_KEY`를 넣으면 채널의 모든 영상에서 골라요.")
+        video_sections(ins.daily_videos(today), today, "t",
+                       "오늘 추천할 지난 영상을 찾지 못했어요. 아래 ‘영상 다시 고르기’를 눌러 보세요.")
         if st.button("영상 다시 고르기", key="revideo"):
-            run_with_context("채널의 새 영상을 읽는 중…", lambda p, m: ins.make_videos(today, p, m))
+            run_with_context("채널 영상을 읽고 고르는 중…", lambda p, m: ins.make_videos(today, p, m, reroll=True))
 
 with tab_hist:
     dates = sorted(set(ins.quote_dates()) | set(ins.video_dates()), reverse=True)
@@ -111,11 +143,13 @@ with tab_hist:
         d = st.selectbox("날짜", past, format_func=lambda x: f"{x:%Y-%m-%d (%a)}")
         for i, q in enumerate(ins.daily_quotes(d)):
             quote_card(q, f"h{i}")
-        for i, v in enumerate(ins.daily_videos(d)):
-            video_card(v, d, f"h{i}")
+        hv = ins.daily_videos(d)
+        if hv:
+            st.subheader("추천 영상")
+            video_sections(hv, d, "h", "이날은 전체 영상 추천이 없었어요.")
 
 with tab_ch:
-    st.caption("구독 중인 경제 채널을 넣어 두면 매일 그 채널들의 최근 영상 중에서 추천해요. "
+    st.caption("구독 중인 경제 채널을 넣어 두면 매일 그 채널들의 영상 중에서 추천해요. "
                "채널 주소(youtube.com/@이름), @이름, 채널 ID(UC로 시작) 모두 돼요.")
     if st.session_state.get("channel_msg"):
         st.success(st.session_state.pop("channel_msg"))
@@ -126,7 +160,8 @@ with tab_ch:
             try:
                 cid, name = ins.resolve_channel(text)
                 ins.add_channel(cid, name)
-                st.session_state.channel_msg = f"‘{name}’ 채널을 추가했어요. ‘오늘’ 탭에서 ‘영상 다시 고르기’를 누르면 바로 반영돼요."
+                st.session_state.channel_msg = (f"‘{name}’ 채널을 추가했어요. ‘오늘’ 탭에서 ‘영상 다시 고르기’를 누르면 "
+                                                "바로 반영돼요. (API 키가 있으면 처음 한 번은 채널 전체 영상을 읽느라 조금 걸려요.)")
                 st.rerun()
             except ins.ChannelError as e:
                 st.error(str(e))
@@ -154,9 +189,13 @@ with tab_ch:
 
     if channels:
         st.markdown(f"**채널 {len(channels)}개**")
+        catalog = ins.catalog_state() if ins.youtube_api_key() else {}
         for c in channels:
             c1, c2, c3 = st.columns([5, 1, 1])
-            c1.markdown(f"[{c['channel_name']}](https://www.youtube.com/channel/{c['channel_id']})")
+            info = catalog.get(c["channel_id"]) or {}
+            note = f"  \n<span style='color:{ui.tok('muted')}'>영상 {info['count']:,}개 모음</span>" if info.get("count") else ""
+            c1.markdown(f"[{c['channel_name']}](https://www.youtube.com/channel/{c['channel_id']}){note}",
+                        unsafe_allow_html=True)
             on = c2.toggle("사용", value=bool(c.get("is_active", True)), key=f"on-{c['channel_id']}")
             if on != bool(c.get("is_active", True)):
                 ins.set_channel_active(c["channel_id"], on)

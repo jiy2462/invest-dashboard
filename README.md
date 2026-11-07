@@ -46,8 +46,12 @@ Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴�
 ### 오늘의 인사이트 규칙
 - 명언: `quotes` 표(처음 열 때 `lib/quotes_data.py`의 초안을 넣음)에서 날짜를 씨앗으로 2개를 고른다. 최근 60일 안에 나온 명언, 같은 구루·같은 주제는 피한다. ‘명언 목록’ 탭에서 고치거나 끌 수 있다.
 - 해설: Secrets에 `ANTHROPIC_API_KEY`가 있으면 Claude가 내 자산군 비중·목표 차이·수익률과 오늘 시장 지표를 보고 쓴다. 없거나 실패하면 주제별 규칙 기반 해설.
-- 영상: ‘채널 관리’에 넣은 채널의 RSS(최근 15개)에서 30일 안 영상만 본다. 오늘 시장 상황(조정장, VIX, 금리·환율·금값 급변 등)과 내 보유 자산 관련 단어가 제목에 있으면 점수를 더하고, 이미 ‘봤어요’ 한 영상과 14일 안에 추천한 영상은 뺀다. ‘좋아요’ 누른 채널은 가산점. Claude가 있으면 상위 20개 후보 중 3개를 고르고 이유를 쓴다.
-- 앱을 열었을 때 오늘 것이 없으면 그 자리에서 만들고, GitHub Actions(`.github/workflows/daily-insight.yml`)가 매일 06:30(한국 시간)에 미리 만든다. 저장소 Settings → Secrets and variables → Actions에 `SUPABASE_URL`, `SUPABASE_KEY`(선택 `ANTHROPIC_API_KEY`)를 넣어야 동작한다. 매일 DB를 쓰므로 Supabase 무료 프로젝트 일시정지도 막아 준다.
+- 영상 모으기: Secrets에 `YOUTUBE_API_KEY`(YouTube Data API v3, 무료 하루 10,000단위)가 있으면 채널의 업로드 재생목록을 처음 한 번 끝까지(채널당 최대 2,000개) 읽어 `videos` 표에 넣고, 그 뒤로는 매일 최신 영상만 읽는다. 3분 이하(쇼츠)·라이브 예정·비공개 영상은 넣지 않는다. 채널별 진행 상황은 `app_settings`의 `youtube_catalog`. 키가 없거나 API가 실패하면 채널 RSS(최신 15개)를 읽어 매일 쌓는다.
+- 추천은 두 묶음이다.
+  - 채널 전체 영상에서 4개: 2주보다 오래된 영상 중 오늘 시장 상황(조정장, VIX, 금리·환율·금값 급변 등)·내 보유 자산 관련 단어가 제목·설명에 있는 상위 영상에서 2개, 나머지 2개는 무작위(날짜 씨앗이라 하루 동안 같음, ‘영상 다시 고르기’는 새로 뽑음). 이미 ‘봤어요’ 한 영상, 30일 안에 추천한 영상은 뺀다. Claude가 있으면 관련 상위 30개 + 무작위 15개 후보 중 4개를 고르고 이유를 쓴다.
+  - 새 영상: 최근 14일 안에 올라온 영상(‘봤어요’ 한 것 제외). 관련도 높은 6개는 소개 문장(Claude 또는 단어 기반)과 함께 카드로, 나머지(최대 24개)는 목록으로 보여 준다. `daily_videos.made_by = 'new'`로 구분한다.
+  - ‘좋아요’ 누른 채널은 가산점.
+- 앱을 열었을 때 오늘 것이 없으면 그 자리에서 만들고, GitHub Actions(`.github/workflows/daily-insight.yml`)가 매일 06:30(한국 시간)에 미리 만든다. 저장소 Settings → Secrets and variables → Actions에 `SUPABASE_URL`, `SUPABASE_KEY`(선택 `ANTHROPIC_API_KEY`, `YOUTUBE_API_KEY`)를 넣어야 동작한다. 매일 DB를 쓰므로 Supabase 무료 프로젝트 일시정지도 막아 준다.
 
 ## 테스트 (네트워크 없이)
 ```bash

@@ -1,7 +1,7 @@
-"""매일 아침 예약 작업: 오늘의 명언 2개와 추천 영상 3개를 미리 만들어 Supabase에 저장한다.
+"""매일 아침 예약 작업: 오늘의 명언 2개와 추천 영상(전체 영상 중 4개 + 최근 2주 새 영상)을 미리 만들어 Supabase에 저장한다.
 
 GitHub Actions(.github/workflows/daily-insight.yml)가 한국 시간 아침 6시 30분에 실행한다.
-필요한 환경변수: SUPABASE_URL, SUPABASE_KEY (선택: ANTHROPIC_API_KEY, ANTHROPIC_MODEL)
+필요한 환경변수: SUPABASE_URL, SUPABASE_KEY (선택: ANTHROPIC_API_KEY, ANTHROPIC_MODEL, YOUTUBE_API_KEY)
 """
 import os
 import sys
@@ -20,7 +20,8 @@ def main() -> int:
     for q in res["quotes"]:
         print(f"  명언: {q['guru']} — {q['quote_ko']} ({q.get('made_by')})")
     for v in res["videos"]:
-        print(f"  영상: {v['title']} ({v.get('made_by')})")
+        kind = "새 영상" if v.get("kind") == "new" else "추천"
+        print(f"  {kind}: {v['title']} ({v.get('made_by')})")
     for e in res["errors"]:
         print(f"  알림: {e}")
     return 0

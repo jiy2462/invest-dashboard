@@ -162,33 +162,180 @@ def test_parse_takeout_csv():
     assert ins.parse_takeout(df) == [(CH1, "A"), (CH2, "B")]
 
 
-def test_score_videos_prefers_market_topics_and_skips_watched_old_shorts():
+def test_score_videos_splits_new_and_old_and_skips_watched_shorts():
     add_feeds()
     vids = ins.parse_feed(fakes.fake_feed(CH1))[1] + ins.parse_feed(fakes.fake_feed(CH2))[1]
     m = {"keywords": {"금리": 3.0, "국채": 3.0, "연준": 3.0, "조정": 3.0}, "tags": ["미국 금리 상승"]}
     p = {"keywords": {"S&P": 2.0}}
     chans = {CH1: "A", CH2: "B"}
-    scored = ins.score_videos(vids, m, p, [], chans, D, now=datetime.now(timezone.utc))
-    ids = [v["video_id"] for v in scored]
-    assert "v_old" not in ids                       # 30일 지난 영상 제외
-    assert ids[0] == "v_rate"                       # 금리·국채·연준
-    assert ids.index("v_short") > ids.index("v_food") or scored[ids.index("v_short")]["score"] < scored[0]["score"]
-    picks = ins.pick_videos_basic(scored, m)
-    assert len(picks) == 3 and len({p["video_id"] for p in picks}) == 3
-    assert "금리" in picks[0]["reason"]
+    new = ins.score_videos(vids, m, p, [], chans, D, max_age=ins.NEW_VIDEO_DAYS, repeat_days=0)
+    ids = [v["video_id"] for v in new]
+    assert ids[0] == "v_rate" and set(ids) == {"v_rate", "v_sp", "v_food"}   # 2주 지난 것·쇼츠 제외
+    old = ins.score_videos(vids, m, p, [], chans, D, min_age=ins.NEW_VIDEO_DAYS, recency=False)
+    assert [v["video_id"] for v in old] == ["v_old"]
+    assert "금리" in ins.basic_reason(new[0], m)
     hist = [{"date": D.isoformat(), "video_id": "v_rate", "watched": True, "liked": False}]
     assert "v_rate" not in [v["video_id"] for v in ins.score_videos(vids, m, p, hist, chans, D)]
 
 
-def test_make_videos_reads_feeds_and_saves_three():
+def catalog_videos(n=40):
+    """채널 3개, 2주~몇 년 전 영상. 5개마다 하나는 금리 이야기."""
+    now = datetime.now(timezone.utc)
+    chans = [CH1, CH2, "UC" + "c" * 22]
+    out = []
+    for i in range(n):
+        out.append({"video_id": f"o{i}", "channel_id": chans[i % 3],
+                    "title": f"금리 이야기 {i}" if i % 5 == 0 else f"투자 공부 {i}",
+                    "description": "", "published_at": (now - timedelta(days=20 + i * 30)).isoformat()})
+    return out, {c: c[-1] for c in chans}
+
+
+def test_pick_videos_basic_mixes_market_and_random():
+    vids, chans = catalog_videos()
+    m = {"keywords": {"금리": 3.0}, "tags": ["금리 상승"]}
+    scored = ins.score_videos(vids, m, {}, [], chans, D, min_age=ins.NEW_VIDEO_DAYS, recency=False)
+    picks = ins.pick_videos_basic(scored, m, D)
+    assert len(picks) == 4 and len({x["video_id"] for x in picks}) == 4
+    titles = {v["video_id"]: v["title"] for v in vids}
+    assert sum("금리" in titles[x["video_id"]] for x in picks) >= 2           # 시장 맞춤 2개 이상
+    assert any("무작위" in x["reason"] for x in picks)                        # 나머지는 무작위
+    assert any("년" in x["reason"] and "월 영상" in x["reason"] for x in picks)  # 언제 영상인지
+    by_ch = {v["video_id"]: v["channel_id"] for v in vids}
+    assert len({by_ch[x["video_id"]] for x in picks}) == 3                    # 채널 3개 모두
+    assert picks == ins.pick_videos_basic(scored, m, D)                        # 같은 날은 같은 결과
+    others = [ins.pick_videos_basic(scored, m, D, salt=s) for s in range(1, 6)]
+    assert any(o != picks for o in others)                                     # 다시 고르면 바뀜
+
+
+def test_parse_duration():
+    assert ins.parse_duration("PT1H2M3S") == 3723
+    assert ins.parse_duration("PT59S") == 59
+    assert ins.parse_duration("P0D") == 0
+    assert ins.parse_duration("P1DT1M") == 86460
+    assert ins.parse_duration("") == 0
+
+
+def add_catalog():
+    """채널 A: 120개(최신순). 7개마다 쇼츠, 하나는 라이브 예정(길이 0). 채널 B: 3개."""
+    fakes.CATALOG[CH1] = [{"id": f"a{i}", "title": ("금리 전망 " if i % 4 == 0 else "시장 이야기 ") + str(i),
+                           "days_ago": i * 3, "sec": 40 if i % 7 == 3 else 0 if i == 5 else 900}
+                          for i in range(120)]
+    fakes.CATALOG[CH2] = [{"id": f"b{i}", "title": f"S&P 500 분석 {i}", "days_ago": 1 + i * 40, "sec": 1200}
+                          for i in range(3)]
+
+
+def test_refresh_videos_reads_whole_channel_once_then_only_new(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "k")
+    add_catalog()
+    ins.add_channel(CH1, "A")
+    ins.add_channel(CH2, "B")
+    n, errors = ins.refresh_videos(ins.list_channels())
+    assert not errors
+    ids = {v["video_id"] for v in fakes.TABLES["videos"]}
+    shorts = {f"a{i}" for i in range(120) if i % 7 == 3} | {"a5"}
+    assert ids == {f"a{i}" for i in range(120)} - shorts | {"b0", "b1", "b2"}
+    state = ins.catalog_state()
+    assert state[CH1]["count"] == 120 - len(shorts) and state[CH1]["synced"]
+    pages = [c for c in fakes.YT_CALLS if c[0] == "playlistItems" and c[1]["playlistId"] == "UU" + CH1[2:]]
+    assert len(pages) == 3                                    # 50개씩 3쪽을 끝까지
+
+    # 다음 날: 새 영상 하나만 추가, 첫 쪽만 읽는다
+    fakes.YT_CALLS.clear()
+    fakes.CATALOG[CH1].insert(0, {"id": "a_new", "title": "새 영상", "days_ago": 0, "sec": 700})
+    ins.refresh_videos(ins.list_channels())
+    assert "a_new" in {v["video_id"] for v in fakes.TABLES["videos"]}
+    assert len([c for c in fakes.YT_CALLS if c[0] == "playlistItems"]) == 2   # 채널마다 1쪽
+
+
+def test_api_failure_falls_back_to_rss(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "k")
+    add_feeds()
+    fakes.CATALOG[CH1] = [{"id": "a0", "title": "금리", "days_ago": 30, "sec": 900}]
+    ins.add_channel(CH1, "A")
+    ins.add_channel(CH2, "B")          # CATALOG에 없음 → API 실패 → RSS
+    n, errors = ins.refresh_videos(ins.list_channels())
+    ids = {v["video_id"] for v in fakes.TABLES["videos"]}
+    assert "a0" in ids and "v_sp" in ids and "v_rate" not in ids
+    assert len(errors) == 1 and "B" in errors[0]
+    assert CH2 not in ins.catalog_state()
+
+
+def test_make_videos_with_api_saves_four_picks_and_new_videos(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "k")
+    add_catalog()
+    ins.add_channel(CH1, "A")
+    ins.add_channel(CH2, "B")
+    m = {"keywords": {"금리": 3.0}, "tags": ["금리 상승"]}
+    vids, errors = ins.make_videos(D, {}, m)
+    assert not errors
+    picks = [v for v in vids if v["kind"] == "pick"]
+    new = [v for v in vids if v["kind"] == "new"]
+    now = datetime.now(timezone.utc)
+    age = lambda v: (now - pd.Timestamp(v["published_at"]).to_pydatetime()).days  # noqa: E731
+    assert len(picks) == 4 and all(age(v) > ins.NEW_VIDEO_DAYS for v in picks)
+    assert sum("금리" in v["title"] for v in picks) >= 2
+    assert new and all(age(v) <= ins.NEW_VIDEO_DAYS for v in new)
+    assert {v["video_id"] for v in new} == {"a0", "a1", "a2", "a4", "b0"}   # a3 쇼츠, a5 라이브 예정
+    assert all(v["reason"] for v in new)                                    # 6개 이하라 모두 소개 문장
+    assert not {v["video_id"] for v in picks} & {v["video_id"] for v in new}
+
+    # 봤어요는 다시 고르기 뒤에도 남고, 다시 고르면 추천이 바뀐다
+    ins.mark_video(D, new[0]["video_id"], watched=True)
+    before = {v["video_id"] for v in picks}
+    vids2, _ = ins.make_videos(D, {}, m, refresh=False, reroll=True)
+    after = {v["video_id"] for v in vids2 if v["kind"] == "pick"}
+    assert len(after) == 4 and before != after
+    assert next(v for v in vids2 if v["video_id"] == new[0]["video_id"])["watched"] is True
+
+
+def test_make_videos_many_new_videos_cards_and_list(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "k")
+    fakes.CATALOG[CH1] = [{"id": f"n{i}", "title": f"영상 {i}", "days_ago": i * 0.3, "sec": 900} for i in range(60)]
+    ins.add_channel(CH1, "A")
+    vids, _ = ins.make_videos(D, {}, {})
+    new = [v for v in vids if v["kind"] == "new"]
+    assert len(new) == ins.NEW_MAX
+    assert len([v for v in new if v["reason"]]) == ins.NEW_CARDS
+    assert len([v for v in vids if v["kind"] == "pick"]) == 4
+
+
+def test_make_videos_rss_only():
     add_feeds()
     ins.add_channel(CH1, "A")
     ins.add_channel(CH2, "B")
     vids, errors = ins.make_videos(D, {}, {"keywords": {"금리": 3.0}, "tags": []})
-    assert len(vids) == 3 and not errors
+    assert not errors
+    assert [v["video_id"] for v in vids if v["kind"] == "pick"] == ["v_old"]
+    assert {v["video_id"] for v in vids if v["kind"] == "new"} == {"v_rate", "v_sp", "v_food"}
     assert {v["channel_name"] for v in vids} == {"A", "B"}
     ins.mark_video(D, vids[0]["video_id"], watched=True)
     assert ins.daily_videos(D)[0]["watched"] is True
+
+
+def test_make_videos_with_claude(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "k")
+    monkeypatch.setattr(ins, "claude_enabled", lambda: True)
+    add_catalog()
+    ins.add_channel(CH1, "A")
+    ins.add_channel(CH2, "B")
+    seen = {}
+
+    def fake_ask(system, prompt, schema):
+        import json
+        import re
+        a = json.loads(re.search(r"\[A\..*?\]\n(\[.*?\])\n", prompt, re.S).group(1))
+        b = json.loads(re.search(r"\[B\..*?\]\n(\[.*?\])\n", prompt, re.S).group(1))
+        seen["a"], seen["b"] = a, b
+        return {"picks": [{"video_id": x["video_id"], "reason": "AI 이유"} for x in a[:4]],
+                "new": [{"video_id": x["video_id"], "reason": "AI 소개"} for x in b]}
+
+    monkeypatch.setattr(ins, "ask_claude_json", fake_ask)
+    vids, errors = ins.make_videos(D, {}, {"keywords": {"금리": 3.0}, "tags": []})
+    assert not errors
+    assert len(seen["a"]) > 4 and seen["b"]
+    picks = [v for v in vids if v["kind"] == "pick"]
+    assert len(picks) == 4 and all(v["made_by"] == "claude" and v["reason"] == "AI 이유" for v in picks)
+    assert all(v["reason"] == "AI 소개" for v in vids if v["kind"] == "new")
 
 
 # ── 화면 ────────────────────────────────────────────────────
@@ -211,8 +358,13 @@ def test_insight_page_quotes_channels_and_videos():
     assert fakes.TABLES["youtube_channels"][0]["channel_id"] == CH1
     [b for b in at.button if b.label == "영상 다시 고르기"][0].click().run()
     assert not at.exception
-    assert len(fakes.TABLES["daily_videos"]) == 2  # 채널 A의 최근 영상 2개 (60일 지난 것 제외)
-    [b for b in at.button if b.key == "w-t0"][0].click().run()
+    rows = fakes.TABLES["daily_videos"]          # 채널 A: 지난 영상 1개(추천) + 새 영상 2개
+    assert {r["video_id"] for r in rows if r["made_by"] != "new"} == {"v_old"}
+    assert {r["video_id"] for r in rows if r["made_by"] == "new"} == {"v_rate", "v_food"}
+    md = " ".join(m.value for m in at.markdown)
+    assert "채널 전체 영상에서 고른 4개" in md and "새로 올라온 영상" in md
+    assert any("YOUTUBE_API_KEY" in c.value for c in at.caption)
+    [b for b in at.button if b.key == "w-tp0"][0].click().run()
     assert not at.exception
     assert any(r["watched"] for r in fakes.TABLES["daily_videos"])
 
@@ -234,3 +386,17 @@ def test_market_page_shows_today_quotes_preview():
     assert not at.exception
     md = " ".join(m.value for m in at.markdown)
     assert "오늘의 명언" in md and "—" in md
+
+
+def test_insight_page_with_api_key_shows_both_sections(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "k")
+    fakes.CATALOG[CH1] = [{"id": f"n{i}", "title": f"금리 영상 {i}", "days_ago": i * 0.5, "sec": 900} for i in range(80)]
+    ins.add_channel(CH1, "채널 A")
+    at = run("insight")
+    assert not at.exception
+    md = " ".join(m.value for m in at.markdown)
+    assert "채널 전체 영상에서 고른 4개" in md and "영상 80개 모음" in md
+    assert len([b for b in at.button if (b.key or "").startswith("w-tp")]) == 4
+    assert len([b for b in at.button if (b.key or "").startswith("w-tn")]) == ins.NEW_CARDS
+    assert any("더 보기" in e.label for e in at.expander)
+    assert not any("YOUTUBE_API_KEY" in c.value for c in at.caption)
