@@ -46,3 +46,31 @@ def test_preset_and_market_card():
     figs = [json.loads(c.proto.spec) for c in at.get("plotly_chart")]
     fg = [f for f in figs if f["layout"].get("yaxis", {}).get("range") == [0, 100]]
     assert fg and fg[0]["data"][0]["type"] == "scatter"
+
+
+
+def test_load_parses_history_and_maps_errors():
+    import requests
+
+    s = fear_greed.load(lambda: BODY)
+    assert len(s) == 3 and s.iloc[-1] == 62.3
+
+    def blocked():
+        r = requests.Response()
+        r.status_code = 418
+        raise requests.HTTPError(response=r)
+
+    try:
+        fear_greed.load(blocked)
+        raise AssertionError("오류가 나야 함")
+    except fear_greed.FearGreedError as e:
+        assert "418" in str(e)
+
+
+def test_package_fetch_uses_fear_and_greed_and_turns_off_global_cache(monkeypatch):
+    import requests_cache
+    from fear_and_greed import cnn
+
+    monkeypatch.setattr(cnn.Fetcher, "__call__", lambda self: BODY)
+    assert fear_greed._package_fetch() is BODY
+    assert not requests_cache.is_installed()  # 다른 requests 요청엔 캐시가 끼지 않음
