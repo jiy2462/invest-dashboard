@@ -1,12 +1,16 @@
-"""오늘의 인사이트: 하루 2개 구루 명언 + 구독 경제 유튜브 추천 3개.
+"""오늘의 인사이트: 하루 2개 구루 명언 + 구독 경제 유튜브 추천.
 
 - 명언은 quotes 표(처음엔 lib/quotes_data.py로 채움)에서 날짜를 씨앗으로 무작위로 고르고,
   최근 60일 안에 나온 명언은 피한다.
 - 해설: ANTHROPIC_API_KEY가 있으면 Claude가 내 포트폴리오·오늘 시장 숫자를 보고 쓰고,
   없거나 실패하면 규칙 기반 기본 해설을 쓴다.
-- 영상: 채널 RSS(youtube.com/feeds/videos.xml?channel_id=...)로 최근 영상을 모으고,
-  오늘 시장 상황·내 보유 자산과 관련된 단어가 제목에 있는지로 점수를 매겨 후보를 고른다.
-  Claude가 있으면 후보 중 3개를 고르고 이유를 쓴다.
+- 영상 모으기: YOUTUBE_API_KEY가 있으면 YouTube Data API로 채널의 '모든' 업로드 영상을 한 번 다 읽어 두고
+  (쇼츠·라이브 예정 영상은 빼고), 그 뒤로는 매일 최신 페이지만 읽는다. 키가 없으면 채널 RSS(채널별 최신 15개)를
+  매일 읽어 videos 표에 쌓는다.
+- 추천은 두 묶음이다.
+  1) 오늘의 추천 4개: 2주보다 오래된 '전체 영상' 중에서 지금 시장·내 보유 자산과 맞는 영상 2개 + 무작위 2개.
+  2) 새 영상: 최근 2주 안에 올라온 영상 (관련도 높은 6개는 소개 문장과 함께, 나머지는 목록으로).
+  Claude가 있으면 1)을 고르고 이유를 쓰며 2)의 소개 문장도 쓴다. 없으면 제목 단어 점수로 고른다.
 - 앱을 열었을 때 오늘 것이 없으면 그 자리에서 만들고, GitHub Actions가 매일 아침 미리 만든다.
 """
 from __future__ import annotations
@@ -29,10 +33,16 @@ from lib.quotes_data import QUOTES
 
 KST = ZoneInfo("Asia/Seoul")
 QUOTES_PER_DAY = 2
-VIDEOS_PER_DAY = 3
+VIDEOS_PER_DAY = 4           # 전체 영상 중에서 고르는 오늘의 추천 수
+MARKET_PICKS = 2             # 그중 시장 맞춤으로 고르는 수 (나머지는 무작위)
 QUOTE_COOLDOWN_DAYS = 60     # 최근 이 기간에 나온 명언은 다시 고르지 않는다
-VIDEO_MAX_AGE_DAYS = 30      # 이보다 오래된 영상은 추천하지 않는다
-VIDEO_REPEAT_DAYS = 14       # 최근 추천한 영상은 이 기간 동안 다시 추천하지 않는다
+NEW_VIDEO_DAYS = 14          # 이 기간 안에 올라온 영상은 '새 영상'으로 따로 보여 준다
+NEW_CARDS = 6                # 새 영상 중 소개 문장과 함께 카드로 보여 줄 수
+NEW_MAX = 30                 # 새 영상 목록에 담을 최대 수
+VIDEO_REPEAT_DAYS = 30       # 추천에 나온 영상은 이 기간 동안 다시 추천하지 않는다
+SHORTS_MAX_SEC = 180         # 이 길이 이하 영상은 쇼츠로 보고 모으지 않는다 (API로 길이를 알 때)
+CATALOG_MAX_PAGES = 40       # 채널 하나에서 처음 읽어 둘 최대 페이지 (50개씩 → 2,000개)
+PAGE_SIZE = 1000             # Supabase 한 번에 읽는 최대 행 수
 DEFAULT_MODEL = "claude-opus-5-5"
 UA = {"User-Agent": "Mozilla/5.0 (invest-dashboard)", "Accept-Language": "ko,en;q=0.8"}
 
@@ -46,7 +56,14 @@ def _db():
 
 
 def _all(table: str) -> list[dict]:
-    return _db().table(table).select("*").execute().data or []
+    """표 전체 (Supabase는 한 번에 1,000행까지만 주므로 나눠 읽는다)."""
+    out, start = [], 0
+    while True:
+        rows = _db().table(table).select("*").range(start, start + PAGE_SIZE - 1).execute().data or []
+        out += rows
+        if len(rows) < PAGE_SIZE:
+            return out
+        start += PAGE_SIZE
 
 
 # ── 명언 저장 ───────────────────────────────────────────────
@@ -160,12 +177,14 @@ def delete_channel(channel_id: str) -> None:
     _db().table("youtube_channels").delete().eq("channel_id", channel_id).execute()
 
 
+VIDEO_COLS = ("video_id", "channel_id", "title", "description", "published_at", "thumbnail_url")
+
+
 def upsert_videos(videos: list[dict]) -> None:
     db = _db()
-    for v in videos:
-        db.table("videos").upsert({k: v.get(k) for k in
-                                   ("video_id", "channel_id", "title", "description", "published_at", "thumbnail_url")},
-                                  on_conflict="video_id").execute()
+    rows = list({v["video_id"]: {k: v.get(k) for k in VIDEO_COLS} for v in videos}.values())
+    for i in range(0, len(rows), 500):
+        db.table("videos").upsert(rows[i:i + 500], on_conflict="video_id").execute()
 
 
 def list_videos() -> list[dict]:
@@ -173,16 +192,24 @@ def list_videos() -> list[dict]:
 
 
 def daily_videos(d: date) -> list[dict]:
+    """그날의 영상 (추천 4개가 먼저, 그다음 새 영상). 새 영상은 kind='new'."""
     rows = _db().table("daily_videos").select("*").eq("date", _date_str(d)).execute().data or []
-    vids = {v["video_id"]: v for v in _all("videos")}
+    if not rows:
+        return []
+    ids = [r["video_id"] for r in rows]
+    vids = {}
+    for i in range(0, len(ids), 100):
+        for v in _db().table("videos").select("*").in_("video_id", ids[i:i + 100]).execute().data or []:
+            vids[v["video_id"]] = v
     chans = {c["channel_id"]: c.get("channel_name") for c in _all("youtube_channels")}
     out = []
-    for r in sorted(rows, key=lambda r: r.get("rank") or 0):
+    for r in sorted(rows, key=lambda r: (r.get("made_by") == "new", r.get("rank") or 0)):
         v = vids.get(r["video_id"])
         if v:
             out.append({**v, "channel_name": chans.get(v["channel_id"], ""), "rank": r.get("rank"),
                         "reason": r.get("reason"), "watched": bool(r.get("watched")),
-                        "liked": bool(r.get("liked")), "made_by": r.get("made_by")})
+                        "liked": bool(r.get("liked")), "made_by": r.get("made_by"),
+                        "kind": "new" if r.get("made_by") == "new" else "pick"})
     return out
 
 
@@ -190,13 +217,23 @@ def video_dates() -> list[date]:
     return sorted({date.fromisoformat(_date_str(r["date"])) for r in _all("daily_videos")}, reverse=True)
 
 
-def save_daily_videos(d: date, picks: list[dict]) -> None:
+def save_daily_videos(d: date, picks: list[dict], new: list[dict] | None = None) -> None:
+    """그날의 추천(picks)과 새 영상(new, made_by='new')을 저장한다. 그날 이미 누른 봤어요·좋아요는 남긴다."""
     db = _db()
-    db.table("daily_videos").delete().eq("date", _date_str(d)).execute()
+    ds = _date_str(d)
+    old = {r["video_id"]: r for r in db.table("daily_videos").select("*").eq("date", ds).execute().data or []}
+    db.table("daily_videos").delete().eq("date", ds).execute()
+    rows = []
     for i, p in enumerate(picks, 1):
-        db.table("daily_videos").insert({"date": _date_str(d), "video_id": p["video_id"], "rank": i,
-                                         "reason": p.get("reason"), "made_by": p.get("made_by"),
-                                         "watched": False, "liked": False}).execute()
+        rows.append({"date": ds, "video_id": p["video_id"], "rank": i, "reason": p.get("reason"),
+                     "made_by": p.get("made_by")})
+    for i, p in enumerate(new or [], 1):
+        rows.append({"date": ds, "video_id": p["video_id"], "rank": i, "reason": p.get("reason"), "made_by": "new"})
+    for r in rows:
+        o = old.get(r["video_id"], {})
+        r["watched"], r["liked"] = bool(o.get("watched")), bool(o.get("liked"))
+    if rows:
+        db.table("daily_videos").insert(rows).execute()
 
 
 def mark_video(d: date, video_id: str, **flags) -> None:
@@ -322,6 +359,135 @@ def refresh_feeds(channels: list[dict]) -> tuple[int, list[str]]:
     if collected:
         upsert_videos(collected)
     return len(collected), errors
+
+
+# ── YouTube Data API (채널 전체 영상) ───────────────────────
+
+YT_API = "https://www.googleapis.com/youtube/v3"
+CATALOG_KEY = "youtube_catalog"   # app_settings: {채널 ID: {"synced": 날짜, "count": 영상 수}}
+
+
+class YouTubeApiError(Exception):
+    pass
+
+
+def youtube_api_key() -> str:
+    return secret("YOUTUBE_API_KEY")
+
+
+def yt_get(path: str, params: dict) -> dict:
+    """YouTube Data API GET. 오류 메시지에 키가 든 주소가 남지 않게 직접 만든다."""
+    try:
+        r = requests.get(f"{YT_API}/{path}", params={**params, "key": youtube_api_key()}, timeout=15)
+    except requests.RequestException as e:
+        raise YouTubeApiError(f"YouTube API 연결 실패: {type(e).__name__}") from None
+    if r.status_code != 200:
+        try:
+            err = r.json().get("error", {})
+            msg = err.get("message") or ""
+            reason = (err.get("errors") or [{}])[0].get("reason", "")
+        except Exception:
+            msg, reason = r.text[:200], ""
+        if reason == "quotaExceeded":
+            msg = "오늘 쓸 수 있는 YouTube API 사용량을 다 썼어요. 내일 다시 읽어요."
+        raise YouTubeApiError(f"YouTube API 오류 {r.status_code}: {msg}")
+    return r.json()
+
+
+def parse_duration(text: str) -> int:
+    """ISO 8601 길이(PT1H2M3S, P0D) → 초."""
+    m = re.fullmatch(r"P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?", text or "")
+    if not m:
+        return 0
+    d, h, mi, se = (int(x or 0) for x in m.groups())
+    return ((d * 24 + h) * 60 + mi) * 60 + se
+
+
+def _durations(ids: list[str]) -> dict[str, int]:
+    """영상 ID → 길이(초). 비공개·삭제된 영상은 빠진다."""
+    if not ids:
+        return {}
+    data = yt_get("videos", {"part": "contentDetails", "id": ",".join(ids)})
+    return {it["id"]: parse_duration((it.get("contentDetails") or {}).get("duration", ""))
+            for it in data.get("items", [])}
+
+
+def fetch_catalog(channel_id: str, known: set[str], full: bool) -> list[dict]:
+    """채널 업로드 재생목록(UU...)을 읽는다. full이면 끝까지(최대 CATALOG_MAX_PAGES쪽),
+    아니면 이미 아는 영상이 나올 때까지만 읽는다. 쇼츠·라이브 예정·비공개 영상은 뺀다."""
+    playlist = "UU" + channel_id[2:]
+    out, token = [], None
+    for _ in range(CATALOG_MAX_PAGES if full else 5):
+        params = {"part": "snippet,contentDetails", "playlistId": playlist, "maxResults": 50}
+        if token:
+            params["pageToken"] = token
+        data = yt_get("playlistItems", params)
+        items = data.get("items", [])
+        ids = [(it.get("contentDetails") or {}).get("videoId") for it in items]
+        durs = _durations([i for i in ids if i])
+        for it, vid in zip(items, ids):
+            if not vid or durs.get(vid, 0) <= SHORTS_MAX_SEC:
+                continue
+            sn = it.get("snippet") or {}
+            thumbs = sn.get("thumbnails") or {}
+            thumb = next((thumbs[k]["url"] for k in ("high", "medium", "default") if k in thumbs), None)
+            out.append({
+                "video_id": vid, "channel_id": channel_id, "title": sn.get("title") or "",
+                "description": (sn.get("description") or "")[:500],
+                "published_at": (it.get("contentDetails") or {}).get("videoPublishedAt") or sn.get("publishedAt"),
+                "thumbnail_url": thumb or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+            })
+        token = data.get("nextPageToken")
+        if not token or (not full and any(i in known for i in ids)):
+            break
+    return out
+
+
+def catalog_state() -> dict:
+    rows = _db().table("app_settings").select("*").eq("key", CATALOG_KEY).execute().data or []
+    return (rows[0].get("value") or {}) if rows else {}
+
+
+def refresh_videos(channels: list[dict]) -> tuple[int, list[str]]:
+    """영상을 새로 모은다. API 키가 있으면 채널 전체(처음 한 번) + 최신 영상, 없거나 실패하면 RSS."""
+    if not youtube_api_key():
+        return refresh_feeds(channels)
+    state = catalog_state()
+    by_channel: dict[str, set[str]] = {}
+    for v in list_videos():
+        by_channel.setdefault(v["channel_id"], set()).add(v["video_id"])
+    errors, collected, fallback = [], [], []
+    today = today_kst().isoformat()
+
+    def one(c):
+        cid = c["channel_id"]
+        full = cid not in state
+        try:
+            return c, full, fetch_catalog(cid, by_channel.get(cid, set()), full), None
+        except Exception as e:
+            return c, full, [], str(e)
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for c, full, vids, err in ex.map(one, channels):
+            cid = c["channel_id"]
+            if err:
+                errors.append(f"{c.get('channel_name') or cid}: {err}")
+                fallback.append(c)
+                continue
+            collected.extend(vids)
+            known = by_channel.get(cid, set()) | {v["video_id"] for v in vids}
+            prev = state.get(cid) or {}
+            state[cid] = {"synced": prev.get("synced") if not full else today, "checked": today,
+                          "count": len(known)}
+    if collected:
+        upsert_videos(collected)
+    _db().table("app_settings").upsert({"key": CATALOG_KEY, "value": state}, on_conflict="key").execute()
+    n = len(collected)
+    if fallback:
+        k, errs = refresh_feeds(fallback)
+        n += k
+        errors += errs
+    return n, errors
 
 
 # ── 오늘 시장·내 포트폴리오 요약 ────────────────────────────
@@ -600,14 +766,22 @@ def _parse_dt(s) -> datetime | None:
         return None
 
 
+def is_short(v: dict) -> bool:
+    text = ((v.get("title") or "") + " " + (v.get("description") or "")[:300]).lower()
+    return "#shorts" in text or "#short " in text or text.rstrip().endswith("#short")
+
+
 def score_videos(videos: list[dict], m: dict, p: dict, history: list[dict], channels: dict[str, str],
-                 d: date, now: datetime | None = None) -> list[dict]:
-    """영상마다 점수와 추천 이유를 붙여 높은 순으로 돌려준다. 이미 본 영상, 최근 추천한 영상, 오래된 영상은 뺀다."""
+                 d: date, now: datetime | None = None, min_age: float | None = None,
+                 max_age: float | None = None, repeat_days: int = VIDEO_REPEAT_DAYS,
+                 recency: bool = True) -> list[dict]:
+    """영상마다 점수(오늘 시장·내 보유 자산과 관련된 단어)를 붙여 높은 순으로 돌려준다.
+    이미 본 영상, 최근 repeat_days 안에 추천한 영상, 쇼츠, 나이(일)가 [min_age, max_age] 밖인 영상은 뺀다."""
     now = now or datetime.now(timezone.utc)
     watched = {h["video_id"] for h in history if h.get("watched")}
     recent = {h["video_id"] for h in history
-              if _date_str(h["date"]) != _date_str(d)
-              and date.fromisoformat(_date_str(h["date"])) >= d - timedelta(days=VIDEO_REPEAT_DAYS)}
+              if repeat_days and _date_str(h["date"]) != _date_str(d)
+              and date.fromisoformat(_date_str(h["date"])) >= d - timedelta(days=repeat_days)}
     vid_channel = {v["video_id"]: v["channel_id"] for v in videos}
     liked = {}
     for h in history:
@@ -621,9 +795,11 @@ def score_videos(videos: list[dict], m: dict, p: dict, history: list[dict], chan
     for v in videos:
         if v["video_id"] in watched or v["video_id"] in recent or v.get("channel_id") not in channels:
             continue
+        if is_short(v):
+            continue
         pub = _parse_dt(v.get("published_at"))
-        age = (now - pub).total_seconds() / 86400 if pub else 99
-        if age > VIDEO_MAX_AGE_DAYS:
+        age = (now - pub).total_seconds() / 86400 if pub else 9999
+        if (max_age is not None and age > max_age) or (min_age is not None and age <= min_age):
             continue
         title = v.get("title") or ""
         text = (title + " " + (v.get("description") or "")[:300]).lower()
@@ -631,15 +807,22 @@ def score_videos(videos: list[dict], m: dict, p: dict, history: list[dict], chan
         hit_p = [k for k in pk if k.lower() in text and k not in hit_m]
         score = sum(mk[k] * (1.5 if k.lower() in title.lower() else 1) for k in hit_m)
         score += sum(pk[k] * (1.5 if k.lower() in title.lower() else 1) for k in hit_p)
-        score += 2 if age <= 2 else 1 if age <= 7 else 0
+        if recency:
+            score += 2 if age <= 2 else 1 if age <= 7 else 0
         score += min(liked.get(v["channel_id"], 0), 2)
-        if "#shorts" in text or "#short" in text:
-            score -= 3
         out.append({**v, "channel_name": channels.get(v["channel_id"], ""), "score": round(score, 2),
                     "hits_market": [k for k in hit_m if mk[k] >= 1], "hits_portfolio": hit_p,
                     "age_days": round(age, 1)})
     out.sort(key=lambda x: (-x["score"], x["age_days"]))
     return out
+
+
+def _when(v: dict) -> str:
+    pub = _parse_dt(v.get("published_at"))
+    if not pub:
+        return ""
+    k = pub.astimezone(KST)
+    return f"{k.year}년 {k.month}월"
 
 
 def basic_reason(v: dict, m: dict) -> str:
@@ -651,28 +834,53 @@ def basic_reason(v: dict, m: dict) -> str:
     if v.get("hits_portfolio"):
         words = "·".join(f"'{k}'" for k in v["hits_portfolio"][:2])
         parts.append(f"내 보유 자산과 관련된 {words} 내용이 있어요.")
+    age = v.get("age_days", 9999)
     if not parts:
-        parts.append(f"{v.get('channel_name') or '구독 채널'}의 최신 영상이에요.")
-    if v.get("age_days", 99) <= 2:
+        if age <= NEW_VIDEO_DAYS:
+            parts.append(f"{v.get('channel_name') or '구독 채널'}의 새 영상이에요.")
+        else:
+            parts.append(f"{v.get('channel_name') or '구독 채널'}의 지난 영상 중에서 무작위로 골랐어요.")
+    if age <= 2:
         parts.append("최근 이틀 안에 올라왔어요.")
+    elif age > NEW_VIDEO_DAYS and _when(v):
+        parts.append(f"({_when(v)} 영상)")
     return " ".join(parts)
 
 
-def pick_videos_basic(scored: list[dict], m: dict, n: int = VIDEOS_PER_DAY) -> list[dict]:
-    """점수 순으로 n개, 처음에는 채널이 겹치지 않게."""
+def _relevant(v: dict) -> bool:
+    return bool(v.get("hits_market") or v.get("hits_portfolio"))
+
+
+def pick_videos_basic(scored: list[dict], m: dict, d: date, n: int = VIDEOS_PER_DAY, salt: int = 0,
+                      n_market: int = MARKET_PICKS) -> list[dict]:
+    """전체 영상 중 n개: 시장·보유 자산과 관련된 상위 영상에서 n_market개, 나머지는 무작위.
+    날짜(+salt)를 씨앗으로 써서 같은 날은 같은 결과. 채널은 되도록 겹치지 않게."""
+    rng = random.Random(f"{_date_str(d)}-{salt}")
     picked, used = [], set()
-    for v in scored:
-        if v["channel_id"] not in used:
+
+    def take(pool, k):
+        pool = [v for v in pool if v not in picked]
+        rng.shuffle(pool)
+        for _ in range(k):
+            if not pool:
+                return
+            v = next((x for x in pool if x["channel_id"] not in used), pool[0])
+            pool.remove(v)
             picked.append(v)
             used.add(v["channel_id"])
-        if len(picked) == n:
-            break
-    for v in scored:
-        if len(picked) == n:
-            break
-        if v not in picked:
-            picked.append(v)
+
+    relevant = [v for v in scored if _relevant(v)][:8]
+    take(relevant, min(n_market, n))
+    take(scored, n - len(picked))
     return [{"video_id": v["video_id"], "reason": basic_reason(v, m), "made_by": "basic"} for v in picked]
+
+
+def new_videos_basic(scored: list[dict], m: dict) -> list[dict]:
+    """새 영상 목록: 관련도 높은 NEW_CARDS개는 소개 문장, 나머지는 최신순."""
+    top = scored[:NEW_CARDS]
+    rest = sorted(scored[NEW_CARDS:NEW_MAX], key=lambda v: v["age_days"])
+    return ([{"video_id": v["video_id"], "reason": basic_reason(v, m)} for v in top]
+            + [{"video_id": v["video_id"], "reason": None} for v in rest])
 
 
 # ── Claude ─────────────────────────────────────────────────
@@ -762,21 +970,35 @@ def claude_quote_notes(quotes: list[dict], p: dict, m: dict) -> dict[int, tuple[
 
 
 VIDEO_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["picks"],
-    "properties": {"picks": {"type": "array", "items": {
-        "type": "object", "additionalProperties": False, "required": ["video_id", "reason"],
-        "properties": {"video_id": {"type": "string"}, "reason": {"type": "string"}}}}},
+    "type": "object", "additionalProperties": False, "required": ["picks", "new"],
+    "properties": {
+        "picks": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["video_id", "reason"],
+            "properties": {"video_id": {"type": "string"}, "reason": {"type": "string"}}}},
+        "new": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["video_id", "reason"],
+            "properties": {"video_id": {"type": "string"}, "reason": {"type": "string"}}}},
+    },
 }
 
 
-def claude_pick_videos(cands: list[dict], p: dict, m: dict, n: int = VIDEOS_PER_DAY) -> list[dict]:
-    rows = [{"video_id": v["video_id"], "channel": v.get("channel_name"), "title": v.get("title"),
+def _video_rows(vs: list[dict]) -> list[dict]:
+    return [{"video_id": v["video_id"], "channel": v.get("channel_name"), "title": v.get("title"),
              "published": str(v.get("published_at"))[:10], "description": (v.get("description") or "")[:200]}
-            for v in cands]
-    prompt = (_ctx_text(p, m) + "\n\n[구독 채널의 최근 영상 후보]\n" + json.dumps(rows, ensure_ascii=False) +
-              f"\n\n지금 시장 상황과 인영 님 포트폴리오에 가장 도움이 될 영상 {n}개를 골라 주세요. "
-              "같은 채널은 가능하면 피하고, 쇼츠나 광고성 영상은 피하세요. "
-              "reason에는 왜 지금 볼 만한지 한 문장(60자 안팎)으로 씁니다.")
+            for v in vs]
+
+
+def claude_pick_videos(cands: list[dict], new: list[dict], p: dict, m: dict, n: int = VIDEOS_PER_DAY
+                       ) -> tuple[list[dict], dict[str, str]]:
+    """(전체 영상 후보 중 고른 n개, 새 영상별 소개 문장)."""
+    prompt = (_ctx_text(p, m)
+              + "\n\n[A. 구독 채널의 지난 영상 후보 (2주보다 오래된 영상)]\n" + json.dumps(_video_rows(cands), ensure_ascii=False)
+              + "\n\n[B. 최근 2주 안에 올라온 새 영상]\n" + json.dumps(_video_rows(new), ensure_ascii=False)
+              + f"\n\npicks: A에서 영상 {n}개를 골라 주세요. 지금 시장 상황과 인영 님 포트폴리오에 맞는 영상을 "
+              f"{min(MARKET_PICKS, n)}개 안팎으로, 나머지는 시기와 상관없이 지금 다시 볼 만한 영상으로 고릅니다. "
+              "같은 채널은 가능하면 피하고, 쇼츠나 광고성 영상은 피하세요. reason에는 왜 지금 볼 만한지 "
+              "한 문장(60자 안팎)으로 쓰고, 오래된 영상이면 그 점을 감안해 씁니다.\n"
+              "new: B의 영상마다 어떤 내용인지와 지금 볼 만한 이유를 한 문장(60자 안팎)으로 소개해 주세요.")
     data = ask_claude_json(SYSTEM_COACH, prompt, VIDEO_SCHEMA)
     ids = {v["video_id"] for v in cands}
     picks, seen = [], set()
@@ -785,9 +1007,12 @@ def claude_pick_videos(cands: list[dict], p: dict, m: dict, n: int = VIDEOS_PER_
         if vid in ids and vid not in seen and it.get("reason"):
             seen.add(vid)
             picks.append({"video_id": vid, "reason": it["reason"].strip(), "made_by": "claude"})
-    if not picks:
+    new_ids = {v["video_id"] for v in new}
+    intros = {it["video_id"]: it["reason"].strip() for it in data.get("new", [])
+              if it.get("video_id") in new_ids and it.get("reason")}
+    if cands and not picks:
         raise ClaudeError("Claude가 고른 영상이 후보에 없어요.")
-    return picks[:n]
+    return picks[:n], intros
 
 
 # ── 오늘 것 만들기 ──────────────────────────────────────────
@@ -840,31 +1065,49 @@ def make_quotes(d: date, p: dict, m: dict, reroll: bool = False, same_quotes: bo
     return daily_quotes(d), errors
 
 
-def make_videos(d: date, p: dict, m: dict, refresh: bool = True) -> tuple[list[dict], list[str]]:
-    """구독 채널 RSS를 새로 읽고 그날의 추천 3개를 골라 저장한다."""
+def make_videos(d: date, p: dict, m: dict, refresh: bool = True, reroll: bool = False
+                ) -> tuple[list[dict], list[str]]:
+    """영상을 새로 모으고 그날의 추천 4개(전체 영상 중)와 새 영상(최근 2주)을 골라 저장한다."""
     errors = []
     channels = list_channels(active_only=True)
     if not channels:
         return [], ["추천에 쓸 채널이 없어요. '채널 관리'에서 채널을 넣어 주세요."]
     if refresh:
-        _, errs = refresh_feeds(channels)
-        errors += [f"RSS 실패 — {e}" for e in errs]
+        _, errs = refresh_videos(channels)
+        errors += [f"영상 읽기 실패 — {e}" for e in errs]
     names = {c["channel_id"]: c.get("channel_name") or c["channel_id"] for c in channels}
-    scored = score_videos(list_videos(), m, p, _all("daily_videos"), names, d)
-    if not scored:
-        errors.append("최근 30일 안에 올라온 새 영상이 없어요.")
+    videos, history = list_videos(), _all("daily_videos")
+    now = datetime.now(timezone.utc)
+    # 새 영상: 지난날 '봤어요' 한 것만 뺀다 (오늘 누른 것은 다시 골라도 목록에 남긴다)
+    past = [h for h in history if _date_str(h["date"]) != _date_str(d)]
+    new = score_videos(videos, m, p, past, names, d, now=now, max_age=NEW_VIDEO_DAYS, repeat_days=0)
+    old = score_videos(videos, m, p, history, names, d, now=now, min_age=NEW_VIDEO_DAYS, recency=False)
+    if reroll:
+        current = {v["video_id"] for v in daily_videos(d) if v["kind"] == "pick"}
+        if len([v for v in old if v["video_id"] not in current]) >= VIDEOS_PER_DAY:
+            old = [v for v in old if v["video_id"] not in current]
+    if not old:
+        errors.append("2주보다 오래된 영상이 아직 없어 오늘의 추천을 고르지 못했어요."
+                      + ("" if youtube_api_key() else " YOUTUBE_API_KEY를 넣으면 채널의 모든 영상에서 골라요."))
+    if not old and not new:
         return daily_videos(d), errors
-    picks = []
+    salt = random.randint(1, 10 ** 6) if reroll else 0
+    picks, new_rows = [], new_videos_basic(new, m)
     if claude_enabled():
         try:
-            picks = claude_pick_videos(scored[:20], p, m)
+            rng = random.Random(f"{_date_str(d)}-{salt}")
+            rest = old[30:]
+            cands = old[:30] + rng.sample(rest, min(15, len(rest)))
+            picks, intros = claude_pick_videos(cands, new[:NEW_CARDS], p, m)
+            new_rows = [{**r, "reason": intros.get(r["video_id"], r["reason"])} for r in new_rows]
         except Exception as e:
             errors.append(f"AI 추천 실패, 기본 추천으로 대신했어요: {e}")
     if len(picks) < VIDEOS_PER_DAY:
         have = {x["video_id"] for x in picks}
-        rest = pick_videos_basic([v for v in scored if v["video_id"] not in have], m, VIDEOS_PER_DAY - len(picks))
-        picks += rest
-    save_daily_videos(d, picks)
+        picks += pick_videos_basic([v for v in old if v["video_id"] not in have], m, d,
+                                   VIDEOS_PER_DAY - len(picks), salt=salt,
+                                   n_market=max(0, MARKET_PICKS - len(picks)))
+    save_daily_videos(d, picks, new_rows)
     return daily_videos(d), errors
 
 

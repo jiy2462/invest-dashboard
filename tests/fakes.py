@@ -17,6 +17,8 @@ def reset_db() -> None:
     TABLES.clear()
     AUTO_PRICES.clear()
     FEEDS.clear()
+    CATALOG.clear()
+    YT_CALLS.clear()
     PAGES.clear()
     rows = [("^GSPC", "S&P 500", "지수"), ("^KS11", "코스피", "지수"), ("KRW=X", "원/달러", "환율"),
             ("^TNX", "미국 10년물", "금리"), ("ecos:KR10Y", "한국 10년물", "금리")]
@@ -39,7 +41,7 @@ class _Res:
 class _Query:
     def __init__(self, table: str):
         self.t, self.op, self.payload, self.filters, self.cols = table, "select", None, [], "*"
-        self.on_conflict = None
+        self.on_conflict, self.rng = None, None
 
     def select(self, cols="*"):
         self.op, self.cols = "select", cols
@@ -49,6 +51,14 @@ class _Query:
         return self
 
     def limit(self, *a):
+        return self
+
+    def range(self, start, end):
+        self.rng = (start, end)
+        return self
+
+    def in_(self, k, vals):
+        self.filters.append((k, ("in", tuple(vals))))
         return self
 
     def eq(self, k, v):
@@ -72,7 +82,8 @@ class _Query:
         return self
 
     def _match(self, r):
-        return all(r.get(k) == v for k, v in self.filters)
+        return all(r.get(k) in v[1] if isinstance(v, tuple) and v and v[0] == "in" else r.get(k) == v
+                   for k, v in self.filters)
 
     def execute(self):
         rows = TABLES.setdefault(self.t, [])
@@ -83,7 +94,17 @@ class _Query:
                     a = next((x for x in TABLES["assets"] if x["symbol"] == r["symbol"]), None)
                     r["assets"] = {"name": a["name"], "currency": a["currency"]} if a else None
             key = "sort_order" if self.t == "indicator_settings" else "id"
-            return _Res(sorted(out, key=lambda r: r.get(key) or 0))
+            out = sorted(out, key=lambda r: r.get(key) or 0)
+            if self.rng:
+                out = out[self.rng[0]:self.rng[1] + 1]
+            return _Res(out)
+        if self.op in ("insert", "upsert") and isinstance(self.payload, list):
+            done = []
+            for one in self.payload:
+                q = _Query(self.t)
+                q.op, q.payload, q.on_conflict = self.op, one, self.on_conflict
+                done += q.execute().data
+            return _Res(done)
         if self.op in ("insert", "upsert"):
             if self.op == "upsert":
                 keys = self.on_conflict.split(",")
@@ -163,6 +184,7 @@ def install() -> None:
     insight.get_client = lambda: FakeClient()
     insight.fetch_feed = fake_feed
     insight.fetch_page = fake_page
+    insight.yt_get = fake_yt_get
     indicators.get_client = watchlist.get_client = portfolio.get_client = backtest.get_client = lambda: FakeClient()
     backtest.fetch_history = fake_history
     backtest.fetch_fred_krw = lambda: fake_history(("DEXKOUS",))["DEXKOUS"]
@@ -242,3 +264,36 @@ def fake_page(url: str) -> str:
     if url not in PAGES:
         raise RuntimeError("404")
     return PAGES[url]
+
+
+# ── YouTube Data API (가짜) ─────────────────────────────────
+CATALOG: dict[str, list[dict]] = {}  # 채널 ID → [{"id", "title", "days_ago", "sec"}] (최신순)
+YT_CALLS: list[tuple[str, dict]] = []
+
+
+def fake_yt_get(path: str, params: dict) -> dict:
+    from datetime import timedelta, timezone
+
+    YT_CALLS.append((path, dict(params)))
+    now = datetime.now(timezone.utc)
+    if path == "playlistItems":
+        cid = "UC" + params["playlistId"][2:]
+        if cid not in CATALOG:
+            raise RuntimeError("playlistNotFound")
+        entries, size = CATALOG[cid], params.get("maxResults", 50)
+        start = int(params.get("pageToken") or 0)
+        page = entries[start:start + size]
+        items = [{"snippet": {"title": e["title"], "description": e.get("desc", ""),
+                              "thumbnails": {"high": {"url": f"https://i.ytimg.com/vi/{e['id']}/hqdefault.jpg"}}},
+                  "contentDetails": {"videoId": e["id"],
+                                     "videoPublishedAt": (now - timedelta(days=e.get("days_ago", 1))).isoformat()}}
+                 for e in page]
+        out = {"items": items, "pageInfo": {"totalResults": len(entries)}}
+        if start + size < len(entries):
+            out["nextPageToken"] = str(start + size)
+        return out
+    if path == "videos":
+        secs = {e["id"]: e.get("sec", 600) for es in CATALOG.values() for e in es}
+        return {"items": [{"id": i, "contentDetails": {"duration": f"PT{secs[i]}S"}}
+                          for i in params["id"].split(",") if i in secs and secs[i] is not None]}
+    raise RuntimeError(path)
