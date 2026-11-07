@@ -183,8 +183,8 @@ def test_portfolio_page_with_data():
     seed()
     at = run("portfolio")
     assert not at.exception
-    assert [t.label for t in at.tabs] == ["보유 현황", "매수 입력", "자산 배분·리밸런싱", "매도·배당·거래 내역",
-                                           "실현손익·배당", "달러 환전", "설정"]
+    assert [t.label for t in at.tabs] == ["보유 현황", "매수 입력", "알림 대기함", "자산 배분·리밸런싱",
+                                           "매도·배당·거래 내역", "실현손익·배당", "달러 환전", "설정"]
     assert at.metric[0].label == "총 평가금액"
     assert any(s.value == "리밸런싱" for s in at.subheader)
     md = " ".join(m.value for m in at.markdown)

@@ -9,6 +9,7 @@ from lib import portfolio as pf
 from lib import ui
 from lib import symbols
 from lib import market
+from lib import trade_inbox as ib
 
 UP, DOWN = ui.UP, ui.DOWN              # 한국식: 이익 빨강, 손실 파랑
 BAR, INK, MUTED = ui.BLUE, ui.ink(), ui.GRAY3
@@ -138,11 +139,14 @@ else:
 if ccys and not all(c in fx for c in ccys if c in set(tx["currency"]) | set(cash["currency"])):
     st.warning("환율을 받지 못한 통화가 있어 일부 원화 금액은 원가로 표시돼요.")
 
-def pick_symbol(prefix: str):
-    """종목 고르기: 이미 있는 종목, 새 종목 검색, 티커 없는 자산 직접 등록. (티커, 통화, 새 종목 정보)"""
+def pick_symbol(prefix: str, allow_none: bool = False):
+    """종목 고르기: 이미 있는 종목, 새 종목 검색, 티커 없는 자산 직접 등록. (티커, 통화, 새 종목 정보)
+
+    allow_none이면 맨 앞에 '종목을 골라 주세요'를 둬서, 아무것도 안 고른 상태로 시작할 수 있다."""
     known = list(assets["symbol"])
-    pick = st.selectbox("종목", known + [NEW_SEARCH, NEW_MANUAL], key=f"{prefix}-symbol",
-                        format_func=lambda s: {NEW_SEARCH: "➕ 새 종목 검색", NEW_MANUAL: "➕ 티커 없는 자산 직접 등록"}.get(
+    pick = st.selectbox("종목", ([None] if allow_none else []) + known + [NEW_SEARCH, NEW_MANUAL], key=f"{prefix}-symbol",
+                        format_func=lambda s: "종목을 골라 주세요" if s is None else {
+                            NEW_SEARCH: "➕ 새 종목 검색", NEW_MANUAL: "➕ 티커 없는 자산 직접 등록"}.get(
                             s, f"{name_of(s)} · {s.replace(MANUAL, '')}"))
     new_asset = None
     if pick == NEW_SEARCH:
@@ -177,8 +181,15 @@ def acc_label(i) -> str:
     return "선택 안 함" if i is None else acc_name.get(i, str(i))
 
 
-tab_hold, tab_buy, tab_alloc, tab_tx, tab_real, tab_fx, tab_set = st.tabs(
-    ["보유 현황", "매수 입력", "자산 배분·리밸런싱", "매도·배당·거래 내역", "실현손익·배당", "달러 환전", "설정"])
+try:
+    inbox = ib.list_items("pending")
+    inbox_ok = True
+except Exception:
+    inbox, inbox_ok = pd.DataFrame(columns=ib.COLUMNS), False
+
+tab_hold, tab_buy, tab_inbox, tab_alloc, tab_tx, tab_real, tab_fx, tab_set = st.tabs(
+    ["보유 현황", "매수 입력", f"알림 대기함 {len(inbox)}" if len(inbox) else "알림 대기함", "자산 배분·리밸런싱",
+     "매도·배당·거래 내역", "실현손익·배당", "달러 환전", "설정"])
 
 NUM = st.column_config.NumberColumn(format="localized")
 PCT = st.column_config.NumberColumn(format="%+.2f%%")
@@ -548,6 +559,96 @@ with tab_tx:
             if st.button("삭제", key="tx-del-btn"):
                 pf.delete_transaction(int(del_id))
                 st.rerun()
+
+# ── 알림 대기함 ───────────────────────────────────────────
+INBOX_SHOW = 10
+
+with tab_inbox:
+    st.caption("아이폰 단축어(알림 자동화)가 보낸 체결·배당 알림이 여기에 쌓여요. 내용을 확인하고 "
+               "[거래내역에 넣기]를 누르면 거래 내역에 들어가요. 빈칸은 알림에서 못 읽은 값이에요.")
+    if not inbox_ok:
+        st.warning("알림 대기함 표를 읽지 못했어요. Supabase에 `supabase/006_trade_inbox.sql`이 적용됐는지 확인해 주세요.")
+    elif inbox.empty:
+        st.info("대기 중인 알림이 없어요.")
+    for _, item in inbox.head(INBOX_SHOW).iterrows():
+        iid = int(item["id"])
+        p = f"ib{iid}"
+        got = ib.received_kst(item["received_at"])
+        guess = ib.parse(item["title"], item["body"], item["source"], assets, got)
+        # 처음 그릴 때만 추측값을 넣는다(사람이 고친 값은 그대로 둔다).
+        if guess["symbol"]:
+            st.session_state.setdefault(f"{p}-symbol", guess["symbol"])
+        with ui.card(f"inbox-{iid}"):
+            st.markdown(f"**{ib.SOURCES.get(item['source'], item['source'])}** · "
+                        f"{got:%m/%d %H:%M}" if got else f"**{ib.SOURCES.get(item['source'], item['source'])}**")
+            src_label = ib.SOURCES.get(item["source"], item["source"])
+            head = item["title"] if isinstance(item["title"], str) and item["title"] not in ("", src_label) else ""
+            st.text((f"{head}\n" if head else "") + str(item["body"]))
+            sides = list(pf.SIDES)
+            i_side = st.radio("구분", sides, format_func=pf.SIDES.get, horizontal=True, key=f"{p}-side",
+                              index=sides.index(guess["side"]) if guess["side"] in sides else 0)
+            i_sym, i_ccy, i_new = pick_symbol(p, allow_none=True)
+            c1, c2 = st.columns(2)
+            i_date = c1.date_input("날짜", guess["trade_date"], key=f"{p}-date")
+            acc_guess = ib.account_for(item["source"], accounts)
+            i_acc = c2.selectbox("계좌", acc_ids, format_func=acc_label, key=f"{p}-account",
+                                 index=acc_ids.index(acc_guess) if acc_guess in acc_ids else 0)
+            c1, c2, c3, c4 = st.columns(4)
+            if i_side == "dividend":
+                i_qty = 0.0
+                i_price = c1.number_input(f"배당금 총액 ({i_ccy})", min_value=0.0, step=1.0, format="%.4f",
+                                          value=float(guess["price"] or 0.0), key=f"{p}-price")
+            else:
+                i_qty = c1.number_input("수량", min_value=0.0, step=1.0, format="%.8g",
+                                        value=float(guess["quantity"] or 0.0), key=f"{p}-qty")
+                i_price = c2.number_input(f"단가 ({i_ccy})", min_value=0.0, step=1.0, format="%.4f",
+                                          value=float(guess["price"] or 0.0), key=f"{p}-price")
+            i_fee = c3.number_input(f"수수료·세금 ({i_ccy})", min_value=0.0, step=1.0, format="%.4f",
+                                    value=float(guess["fee"] or 0.0), key=f"{p}-fee")
+            i_fx = None
+            if i_ccy != "KRW":
+                i_fx = c4.number_input(f"환율 (원/{i_ccy})", min_value=0.0, value=float(fx.get(i_ccy, 0.0)), step=1.0,
+                                       format="%.2f", key=f"{p}-fx")
+            i_ok = bool(i_sym) and i_price > 0 and (i_side == "dividend" or i_qty > 0)
+            b1, b2 = st.columns(2)
+            if b1.button("거래내역에 넣기", type="primary", disabled=not i_ok, key=f"{p}-save", width="stretch"):
+                if i_new:
+                    pf.upsert_asset(**i_new)
+                new_id = pf.add_transaction({"trade_date": i_date, "account_id": i_acc, "symbol": i_sym,
+                                             "side": i_side, "quantity": i_qty, "price": i_price, "currency": i_ccy,
+                                             "fee": i_fee, "fx_rate": i_fx or None, "memo": "알림 자동 입력"})
+                ib.mark(iid, "done", new_id)
+                st.toast(f"{name_of(i_sym) if not i_new else i_new['name']} {pf.SIDES[i_side]} 기록을 저장했어요.")
+                st.rerun()
+            if b2.button("무시", key=f"{p}-ignore", width="stretch"):
+                ib.mark(iid, "ignored")
+                st.rerun()
+    if len(inbox) > INBOX_SHOW:
+        st.caption(f"나머지 {len(inbox) - INBOX_SHOW}건은 위 알림을 처리하면 이어서 보여요.")
+    if inbox_ok:
+        with st.expander("처리한 알림"):
+            try:
+                done = ib.list_items(None)
+                done = done[done["status"] != "pending"].head(30)
+            except Exception:
+                done = pd.DataFrame(columns=ib.COLUMNS)
+            if done.empty:
+                st.caption("아직 없어요.")
+            else:
+                st.dataframe(pd.DataFrame({
+                    "받은 때": done["received_at"].map(lambda v: f"{ib.received_kst(v):%m/%d %H:%M}"
+                                                       if ib.received_kst(v) else ""),
+                    "회사": done["source"].map(lambda s: ib.SOURCES.get(s, s)),
+                    "상태": done["status"].map({"done": "입력함", "ignored": "무시함"}),
+                    "내용": done["body"].astype(str).str.replace("\n", " ").str.slice(0, 80),
+                }), hide_index=True, width="stretch")
+                ignored = done[done["status"] == "ignored"]
+                if not ignored.empty:
+                    back = st.selectbox("무시한 알림 되돌리기", list(ignored["id"]), key="ib-restore",
+                                        format_func=lambda i: str(ignored.set_index("id").loc[i, "body"])[:40])
+                    if st.button("대기함으로 되돌리기", key="ib-restore-btn"):
+                        ib.mark(int(back), "pending")
+                        st.rerun()
 
 # ── 실현손익·배당 ─────────────────────────────────────────
 with tab_real:

@@ -64,10 +64,11 @@ def list_transactions() -> pd.DataFrame:
     return normalize_tx(df)
 
 
-def add_transaction(tx: dict) -> None:
+def add_transaction(tx: dict) -> int | None:
     payload = {k: tx.get(k) for k in TX_COLUMNS if k != "id"}
     payload["trade_date"] = str(payload["trade_date"])
-    get_client().table("transactions").insert(payload).execute()
+    rows = get_client().table("transactions").insert(payload).execute().data
+    return rows[0].get("id") if rows else None
 
 
 def delete_transaction(tx_id: int) -> None:
