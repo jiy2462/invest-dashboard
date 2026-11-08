@@ -127,3 +127,11 @@ def test_device_panel_creates_link():
     [b for b in at.button if b.label == "해제"][0].click().run()
     assert auth.list_devices() == {}
     assert any(t.label == "비밀번호" for t in at.text_input)  # 지금 기기를 해제하면 로그아웃
+
+
+def test_login_screen_has_restore_script(monkeypatch):
+    bodies = []
+    real = auth.st.html
+    monkeypatch.setattr(auth.st, "html", lambda body, **k: (bodies.append(body), real(body, **k))[1])
+    _app().run()
+    assert any("localStorage.getItem" in b and "location.replace" in b for b in bodies)
