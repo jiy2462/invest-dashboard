@@ -170,6 +170,7 @@ def fake_fear_greed() -> pd.Series:
 
 def install() -> None:
     """앱 모듈의 네트워크 함수를 가짜로 바꾼다."""
+    import lib.auth as auth
     import lib.backtest as backtest
     import lib.charting as charting
     import lib.fear_greed as fear_greed
@@ -184,7 +185,7 @@ def install() -> None:
     import lib.watchlist as watchlist
 
     reset_db()
-    insight.get_client = lambda: FakeClient()
+    auth.get_client = insight.get_client = lambda: FakeClient()
     insight.fetch_feed = fake_feed
     insight.fetch_page = fake_page
     insight.yt_get = fake_yt_get
