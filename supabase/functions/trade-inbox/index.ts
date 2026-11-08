@@ -5,6 +5,7 @@
 // 회사: JSON "source" 또는 주소 끝 `&source=upbit|kis|meritz|nh` (없으면 내용으로 짐작).
 // 본문: JSON {"title": "...", "subtitle": "...", "body": "..."} / 폼 / 그냥 글자 모두 받는다.
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { rejectReason } from "./filter.ts";
 
 const SOURCES: [RegExp, string][] = [
   [/업비트|upbit/i, "upbit"],
@@ -71,6 +72,10 @@ Deno.serve(async (req: Request) => {
     : detectSource(given_source, app, title, body);
   const raw = { ...data };
   delete raw.token;
+
+  // 증권사·업비트 체결/배당 알림이 아니면 저장하지 않는다(카톡 광고, 다른 채널, 카드 결제 등).
+  const skip = rejectReason(source, title, body);
+  if (skip) return reply(200, { ok: true, skipped: true, reason: skip });
 
   const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
     auth: { persistSession: false },
