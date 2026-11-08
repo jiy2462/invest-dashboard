@@ -58,6 +58,7 @@ Supabase 프로젝트 `invest-dashboard` (서울). 스키마는 `supabase/` 폴�
 - 아이폰 단축어(iOS 27 '알림' 개인 자동화)가 업비트 앱 알림, 카카오톡 알림(한국투자증권·메리츠증권·NH투자증권)을 받으면 알림 내용을 Edge Function `trade-inbox`(`supabase/functions/trade-inbox`)로 POST한다.
 - 함수는 Edge Function 시크릿 `INBOX_TOKEN`(전송용 비밀번호)을 헤더 `x-inbox-token`으로 확인하고, `trade_inbox` 표에 원문을 쌓는다. 같은 회사·같은 내용이 10분 안에 또 오면 한 번만 저장. JWT 확인은 끔(`verify_jwt=false`).
 - 본문은 JSON `{"title": "...", "subtitle": "...", "body": "..."}`(단축어 입력의 제목·부제·본문). 회사는 JSON `source` 또는 주소 끝 `&source=upbit|kis|meritz|nh`, 없으면 제목·내용으로 짐작한다. 단축어에서는 헤더 대신 주소 끝 `?token=`으로 비밀번호를 보내도 된다.
+- 함수는 `filter.ts` 규칙으로 한 번 더 거른다: 카톡 자동화(kis·meritz·nh)는 알림 첫 줄(보낸 카톡 채널 이름)이 그 증권사여야 하고, 모든 알림은 체결·매수·매도·배당·분배금·주문 같은 말이 있어야 저장한다. 아이폰에서 카톡 알림 하나가 증권사 자동화 3개를 모두 실행해도 맞는 하나만 남는다.
 - 포트폴리오 → ‘알림 대기함’ 탭에서 `lib/trade_inbox.py`의 읽기 규칙이 구분·종목·수량·단가·날짜·계좌를 미리 채우고, 사람이 확인해 [거래내역에 넣기]를 눌러야 `transactions`에 들어간다(메모 ‘알림 자동 입력’).
 
 ## 테스트 (네트워크 없이)
