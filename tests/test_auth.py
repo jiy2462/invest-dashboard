@@ -1,5 +1,6 @@
 """로그인 유지: 토큰 서명·만료, 새로고침(새 세션)에서 주소의 토큰으로 자동 로그인."""
 import os
+import time
 
 from streamlit.testing.v1 import AppTest
 
@@ -58,3 +59,71 @@ def test_wrong_or_forged_token_needs_password():
     at.query_params[auth.PARAM] = auth.make_token("not-the-password")
     at.run()
     assert at.text_input[0].label == "비밀번호"
+
+
+def test_cookie_login_renews_token():
+    old = auth.make_token("pw", now=time.time() - 20 * 86400)  # 10일 남은 토큰
+    at = _app()
+    at.query_params[auth.PARAM] = old
+    at.run()
+    assert any(m.value == "들어옴" for m in at.markdown)
+    new = at.query_params[auth.PARAM]
+    new = new[0] if isinstance(new, list) else new
+    assert new != old and auth.check_token(new, "pw")
+    assert int(new.split(".")[0]) > time.time() + 29 * 86400  # 다시 30일
+
+
+def test_device_token_registered_and_revocable():
+    tok = auth.add_device("pw", "아이폰")
+    assert tok.startswith("d.") and auth.check_device_token(tok, "pw")
+    assert not auth.check_token(tok, "pw")                        # 일반 토큰으로는 안 통함
+    assert not auth.check_device_token(tok, "other")              # 비밀번호 바뀌면 무효
+    device_id = tok.split(".")[1]
+    forged = auth.make_device_token("pw", "deadbeefdeadbeef", int(time.time()) + 999)
+    assert not auth.check_device_token(forged, "pw")              # 등록 안 된 기기
+    expired = auth.make_device_token("pw", device_id, int(time.time()) - 1)
+    assert not auth.check_device_token(expired, "pw")
+
+    # 기기 주소로 새 세션 열면 바로 들어가고, 주소의 토큰은 그대로 유지
+    at = _app()
+    at.query_params[auth.PARAM] = tok
+    at.run()
+    assert any(m.value == "들어옴" for m in at.markdown)
+    kept = at.query_params[auth.PARAM]
+    assert (kept[0] if isinstance(kept, list) else kept) == tok
+
+    auth.remove_device(device_id)
+    again = _app()
+    again.query_params[auth.PARAM] = tok
+    again.run()
+    assert again.text_input[0].label == "비밀번호"
+
+
+PANEL_APP = """
+import streamlit as st
+from lib.auth import require_password, device_panel
+require_password()
+device_panel()
+"""
+
+
+def test_device_panel_creates_link():
+    at = AppTest.from_string(PANEL_APP, default_timeout=30)
+    at.secrets["APP_PASSWORD"] = "pw"
+    at.query_params[auth.PARAM] = auth.make_token("pw")
+    at.run()
+    name = [t for t in at.text_input if t.label == "기기 이름"][0]
+    name.set_value("아이폰")
+    [b for b in at.button if b.label == "이 기기용 주소 만들기"][0].click().run()
+    assert not at.exception
+    devices = auth.list_devices()
+    assert [d["name"] for d in devices.values()] == ["아이폰"]
+    link = at.code[0].value
+    tok = link.split(f"?{auth.PARAM}=")[1]
+    assert auth.check_device_token(tok, "pw")
+    cur = at.query_params[auth.PARAM]
+    assert (cur[0] if isinstance(cur, list) else cur) == tok  # 지금 화면 주소도 기기 주소로
+
+    [b for b in at.button if b.label == "해제"][0].click().run()
+    assert auth.list_devices() == {}
+    assert any(t.label == "비밀번호" for t in at.text_input)  # 지금 기기를 해제하면 로그아웃
