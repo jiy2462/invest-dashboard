@@ -138,12 +138,38 @@ def _cookie_token() -> str | None:
 
 
 def _set_cookie(value: str, max_age: int) -> None:
-    """브라우저에 쿠키를 심는다 (Streamlit은 쿠키 쓰기 API가 없어 작은 스크립트로)."""
+    """브라우저에 토큰을 저장한다: 쿠키 + localStorage (값이 비면 둘 다 지운다).
+
+    iOS 홈화면 앱·Streamlit Cloud에서는 쿠키가 서버까지 안 오는 경우가 있어
+    localStorage에도 두고, 로그인 화면에서 _restore_script가 주소에 붙여 다시 연다.
+    """
     st.html(
         "<script>"
         f"document.cookie = '{COOKIE}={value}; max-age={max_age}; path=/; SameSite=Lax'"
         " + (location.protocol === 'https:' ? '; Secure' : '');"
+        f"try {{ {'localStorage.setItem' if value else 'localStorage.removeItem'}('{COOKIE}'{f", '{value}'" if value else ''}); }} catch (e) {{}}"
         "</script>",
+        unsafe_allow_javascript=True,
+    )
+
+
+def _restore_script() -> None:
+    """로그인 화면: 브라우저에 저장된 토큰이 있으면 주소(?t=)에 붙여 다시 연다 (반복 방지 30초)."""
+    st.html(
+        "<script>(function () {"
+        "try {"
+        f"  var t = localStorage.getItem('{COOKIE}');"
+        f"  if (!t) {{ var m = document.cookie.match(/(?:^|; ){COOKIE}=([^;]+)/); t = m && m[1]; }}"
+        "  if (!t) return;"
+        "  var u = new URL(location.href);"
+        f"  if (u.searchParams.get('{PARAM}') === t) return;"
+        "  var last = Number(sessionStorage.getItem('invest_auth_try') || 0);"
+        "  if (Date.now() - last < 30000) return;"
+        "  sessionStorage.setItem('invest_auth_try', String(Date.now()));"
+        f"  u.searchParams.set('{PARAM}', t);"
+        "  location.replace(u.toString());"
+        "} catch (e) {}"
+        "})();</script>",
         unsafe_allow_javascript=True,
     )
 
@@ -183,6 +209,8 @@ def require_password() -> None:
 
     if st.session_state.get("logged_out"):
         _set_cookie("", 0)
+    else:
+        _restore_script()
     st.title("투자 대시보드")
     with st.form("login"):
         pw = st.text_input("비밀번호", type="password")
