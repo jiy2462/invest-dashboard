@@ -380,12 +380,21 @@ def test_insight_page_quotes_channels_and_videos():
     assert not at.exception
 
 
-def test_market_page_shows_today_quotes_preview():
+def test_market_page_shows_today_quotes_first():
     ins.make_quotes(ins.today_kst(), {}, {})
     at = run("market")
     assert not at.exception
+    assert [h.value.split(" ·")[0] for h in at.header] == ["오늘의 명언", "나의 다짐", "시장 지표"]
+    picked = ins.daily_quotes(ins.today_kst())
     md = " ".join(m.value for m in at.markdown)
-    assert "오늘의 명언" in md and "—" in md
+    assert all(q["quote_ko"] in md for q in picked)
+    assert any(c.value.startswith("— ") for c in at.caption)
+
+
+def test_market_page_makes_quotes_when_missing():
+    at = run("market")
+    assert not at.exception
+    assert len(ins.daily_quotes(ins.today_kst())) == ins.QUOTES_PER_DAY
 
 
 def test_insight_page_with_api_key_shows_both_sections(monkeypatch):
