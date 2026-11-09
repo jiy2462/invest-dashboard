@@ -177,6 +177,7 @@ def install() -> None:
     import lib.indicators as indicators
     import lib.insight as insight
     import lib.kr_rates as kr_rates
+    import lib.live_quote as live_quote
     import lib.market as market
     import lib.portfolio as portfolio
     import lib.symbols as symbols
@@ -199,6 +200,12 @@ def install() -> None:
     market.validate_yf_symbol = lambda s: s in BASE
     market.auto_price = lambda s: AUTO_PRICES.get(s)
     charting.fetch_ohlcv = fake_ohlcv
+
+    def no_naver(symbol, now=None):
+        raise ConnectionError("테스트: 접속 안 함")
+
+    live_quote.fetch_yahoo = lambda syms: {}
+    live_quote.fetch_naver = no_naver
 
     def offline(code, *a, **k):
         raise kr_rates.KrRateError("테스트: 접속 안 함")

@@ -154,7 +154,16 @@ def card(name: str, symbol: str, df: pd.DataFrame | None, is_rate: bool, error: 
         legend = ma_legend(df)
         st.markdown(f"<div class='ios-legend'>{legend}</div>" if legend else "",
                     unsafe_allow_html=True)
-        st.caption(f"{s['asof']:%Y-%m-%d} 기준 · {market_hours.status(symbol)}")
+        st.caption(asof_caption(df, s["asof"], symbol))
+
+
+def asof_caption(df: pd.DataFrame, day: pd.Timestamp, symbol: str) -> str:
+    """카드 아래 '언제 시세인지'. 장중 실시간 시세를 붙였으면 한국 시각으로 몇 시 몇 분 시세인지 보여 준다."""
+    at = df.attrs.get("asof")
+    if at is not None:
+        kst = pd.Timestamp(at).tz_convert("Asia/Seoul")
+        return f"{kst:%m/%d %H:%M} 기준 · {market_hours.status(symbol)} · {df.attrs.get('source', '야후')}"
+    return f"{day:%Y-%m-%d} 기준 · {market_hours.status(symbol)}"
 
 
 SORT_CSS = """
@@ -216,7 +225,7 @@ with tab_view:
         with st.spinner("시세를 불러오는 중…"):
             data, errors = load_ohlc(visible)
         with st.container(horizontal=True, gap="medium", vertical_alignment="center"):
-            if st.button("새로고침", help="열린 장은 5분마다, 닫힌 장은 마감 뒤 한 번만 새로 받아요. 누르면 모두 다시 받아요."):
+            if st.button("새로고침", help="열린 장은 1분마다 지금 가격을, 닫힌 장은 마감 뒤 한 번만 새로 받아요. 누르면 모두 다시 받아요."):
                 clear_cache()
                 st.cache_data.clear()
                 st.rerun()

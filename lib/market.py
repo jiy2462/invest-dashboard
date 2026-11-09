@@ -11,7 +11,7 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-from lib import fear_greed, kr_rates, market_hours
+from lib import fear_greed, kr_rates, live_quote, market_hours
 
 # ECOS 시장금리(일별) 통계표 817Y002의 항목 코드
 ECOS_SERIES = {
@@ -207,20 +207,27 @@ def load_ohlc_uncached(yf_symbols: tuple[str, ...], kr_symbols: tuple[str, ...],
 
 EXTRA_SOURCES = ("ecos", "cnn")  # 야후 밖에서 지표마다 따로 받는 출처
 
-LIVE_TTL = timedelta(minutes=5)   # 열린 장: 5분마다 새로
+LIVE_TTL = timedelta(minutes=5)   # 열린 장: 일봉(과거 포함)은 5분마다 새로
+QUOTE_TTL = timedelta(minutes=1)  # 열린 장: 오늘 봉(실시간 시세)은 1분마다 새로
 RETRY_TTL = timedelta(minutes=5)  # 못 받은 지표: 5분 뒤 다시 시도
+NAVER_OFF = timedelta(minutes=30)  # 네이버가 막히면 30분 동안은 야후만 쓴다 (매번 기다리지 않게)
 
 
 @st.cache_resource
 def _store() -> dict:
-    """지표별 시세 저장소 (서버 메모리, 모든 접속이 같이 씀). {symbol: {"df", "err", "at"}}"""
-    return {"data": {}, "lock": threading.Lock()}
+    """지표별 시세 저장소 (서버 메모리, 모든 접속이 같이 씀).
+
+    data: {symbol: {"df", "err", "at"}} 일봉, quotes: {symbol: {"q", "at"}} 장중 실시간 시세
+    """
+    return {"data": {}, "quotes": {}, "naver_off_until": None, "lock": threading.Lock()}
 
 
 def clear_cache() -> None:
     st_ = _store()
     with st_["lock"]:
         st_["data"].clear()
+        st_.setdefault("quotes", {}).clear()
+        st_["naver_off_until"] = None
 
 
 def is_fresh(symbol: str, entry: dict | None, now: datetime) -> bool:
@@ -274,7 +281,47 @@ def load_ohlc(settings: list[dict], cached: bool = True,
         out = {s: data[s]["df"] for s in yf_symbols + kr_symbols if data[s]["df"] is not None}
         errors = {s: data[s]["err"] or f"`{s}` 시세를 못 받았어요"
                   for s in yf_symbols + kr_symbols if data[s]["df"] is None}
+        live = tuple(s for s in yf_symbols if s in out and market_hours.is_live(s, now))
+        for sym, q in _live_quotes(store, live, now).items():
+            out[sym] = live_quote.apply(out[sym], q)
     return out, errors
+
+
+def _live_quotes(store: dict, symbols: tuple[str, ...], now: datetime) -> dict[str, "live_quote.Quote"]:
+    """장중 지표의 실시간 시세 (1분마다 새로). 지난 장 시세는 빼고 돌려준다.
+
+    한국 지수·종목은 네이버(지연 없음)를 먼저 쓰고, 막히면 야후 1분봉(약 20분 지연)으로.
+    """
+    quotes = store.setdefault("quotes", {})
+    stale = tuple(s for s in symbols if s not in quotes or now - quotes[s]["at"] >= QUOTE_TTL)
+    if stale:
+        off = store.get("naver_off_until")
+        naver_syms = tuple(s for s in stale if live_quote.naver_target(s)) if not off or now >= off else ()
+        got: dict = {}
+        with ThreadPoolExecutor(max_workers=1 + len(naver_syms)) as pool:
+            yahoo_job = pool.submit(live_quote.fetch_yahoo, stale)
+            naver_jobs = {s: pool.submit(live_quote.fetch_naver, s, now) for s in naver_syms}
+            try:
+                got.update(yahoo_job.result())
+            except Exception:
+                pass
+            naver_ok = False
+            for s, job in naver_jobs.items():
+                try:
+                    q = job.result()
+                except Exception:
+                    continue
+                naver_ok = True
+                if live_quote.is_recent(q, now):
+                    got[s] = q
+            if naver_syms and not naver_ok:
+                store["naver_off_until"] = now + NAVER_OFF
+        for s in stale:
+            old, new = quotes.get(s, {}).get("q"), got.get(s)
+            if new is None or (old is not None and old.at > new.at):  # 더 오래된 시세로 덮지 않는다
+                new = old
+            quotes[s] = {"q": new, "at": now}
+    return {s: quotes[s]["q"] for s in symbols if live_quote.is_recent(quotes[s]["q"], now)}
 
 
 def load_series(settings: list[dict]) -> tuple[dict[str, pd.Series], dict[str, str]]:
