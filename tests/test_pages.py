@@ -94,3 +94,20 @@ def test_click_watchlist_row_opens_chart():
     at.text_input[0].set_value("apple").run()
     [b for b in at.button if b.label == "차트 보기"][0].click().run()
     assert at.session_state.chart_symbol["symbol"] == "AAPL"
+
+
+def test_market_card_shows_live_quote_time(monkeypatch):
+    """장중이면 카드 아래에 한국 시각으로 몇 시 몇 분 시세인지 보여 준다."""
+    from datetime import datetime, timezone
+
+    from lib import live_quote, market_hours
+
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    monkeypatch.setattr(market_hours, "is_live", lambda *a, **k: True)
+    monkeypatch.setattr(live_quote, "fetch_yahoo", lambda syms: {
+        s: live_quote.Quote(price=1500.0, at=now, day=live_quote.day_of(s, now)) for s in syms if s == "KRW=X"})
+    at = run("market")
+    assert not at.exception
+    kst = now.astimezone(live_quote.KST)
+    assert any(c.value.startswith(f"{kst:%m/%d %H:%M} 기준") and "야후" in c.value for c in at.caption)
+    assert any("1,500.00" in m.value for m in at.markdown)
