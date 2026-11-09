@@ -179,6 +179,7 @@ def install() -> None:
     import lib.kr_rates as kr_rates
     import lib.live_quote as live_quote
     import lib.market as market
+    import lib.pledge as pledge
     import lib.portfolio as portfolio
     import lib.symbols as symbols
     import lib.spending as spending
@@ -191,7 +192,7 @@ def install() -> None:
     insight.fetch_page = fake_page
     insight.yt_get = fake_yt_get
     indicators.get_client = watchlist.get_client = portfolio.get_client = backtest.get_client = \
-        trade_inbox.get_client = spending.get_client = lambda: FakeClient()
+        trade_inbox.get_client = spending.get_client = pledge.get_client = lambda: FakeClient()
     backtest.fetch_history = fake_history
     backtest.fetch_fred_krw = lambda: fake_history(("DEXKOUS",))["DEXKOUS"]
     market.fetch_yf_closes = fake_closes
