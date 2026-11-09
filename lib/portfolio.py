@@ -97,8 +97,19 @@ def save_strategy(asset_class: str, text: str | None) -> None:
 
 
 def save_targets(edited: pd.DataFrame, original: pd.DataFrame) -> None:
-    """설정 화면 표 편집 결과를 저장한다: 남은 행은 upsert, 지운 행은 delete."""
+    """설정 화면 표 편집 결과를 저장한다: 남은 행은 upsert, 지운 행은 delete.
+
+    표에서 자산군 이름을 바꾸면(같은 행) 그 자산군의 종목·현금성 자산도 새 이름으로 옮기고,
+    지운 자산군의 종목·현금성 자산은 '미분류'로 옮긴다. 그래야 자산 배분·리밸런싱 표가 설정과 같아진다.
+    """
     db = get_client()
+    renames = {}
+    for idx, r in edited.iterrows():
+        new = str(r.get("asset_class") or "").strip()
+        if idx in original.index and new:
+            old = str(original.loc[idx, "asset_class"] or "").strip()
+            if old and old != new:
+                renames[old] = new
     keep = set()
     for i, r in edited.reset_index(drop=True).iterrows():
         name = str(r.get("asset_class") or "").strip()
@@ -114,8 +125,32 @@ def save_targets(edited: pd.DataFrame, original: pd.DataFrame) -> None:
             "strategy": _txt(r.get("strategy")),
             "sort_order": i + 1,
         }, on_conflict="asset_class").execute()
-    for name in set(original["asset_class"]) - keep:
+    for old, new in renames.items():
+        if old not in keep:
+            _move_class(old, new)
+    gone = set(original["asset_class"]) - keep
+    for name in gone:
         db.table("target_allocation").delete().eq("asset_class", name).execute()
+    for name in gone - set(renames):
+        _move_class(name, UNCLASSIFIED)
+
+
+def _move_class(old: str, new: str) -> None:
+    """자산군 이름이 바뀌거나 지워질 때 그 자산군에 속한 종목·현금성 자산을 옮긴다."""
+    db = get_client()
+    db.table("assets").update({"asset_class": new}).eq("asset_class", old).execute()
+    db.table("cash_balances").update({"asset_class": new}).eq("asset_class", old).execute()
+
+
+def delete_targets(names) -> None:
+    """설정 표에서 자산군 행(목표 비중·월 적립·목표 수익률·전략)을 지운다.
+
+    거래 기록은 그대로 두고, 그 자산군에 속했던 종목·현금성 자산은 '미분류'로 옮긴다."""
+    db = get_client()
+    for name in dict.fromkeys(str(n).strip() for n in names):
+        if name:
+            db.table("target_allocation").delete().eq("asset_class", name).execute()
+            _move_class(name, UNCLASSIFIED)
 
 
 def list_cash() -> pd.DataFrame:
@@ -160,6 +195,71 @@ def get_setting(key: str, default=None):
 
 def set_setting(key: str, value) -> None:
     get_client().table("app_settings").upsert({"key": key, "value": value}, on_conflict="key").execute()
+
+
+# ── 현금성 자산 자동 적립 (예: 적금 매월 1일 자동이체) ─────────────
+AUTO_DEPOSIT_KEY = "cash_auto_deposits"   # app_settings: [{cash_id, amount, day, last: "YYYY-MM"}]
+
+
+def _ym(d: date) -> str:
+    return f"{d.year:04d}-{d.month:02d}"
+
+
+def _due_months(last: str | None, day: int, today: date) -> list[str]:
+    """last(마지막으로 넣은 달) 다음 달부터 오늘까지, 적립일이 지난 달 목록."""
+    months = []
+    y, m = (int(last[:4]), int(last[5:7])) if last else (today.year, today.month - 1)
+    while True:
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+        if (y, m) > (today.year, today.month) or ((y, m) == (today.year, today.month) and today.day < day):
+            return months
+        months.append(f"{y:04d}-{m:02d}")
+
+
+def get_auto_deposits() -> list[dict]:
+    rules = get_setting(AUTO_DEPOSIT_KEY, []) or []
+    return [r for r in rules if isinstance(r, dict) and r.get("cash_id") is not None]
+
+
+def set_auto_deposit(cash_id: int, amount: float, day: int, today: date) -> None:
+    """자동 적립 규칙을 만들거나 바꾼다. 이번 달 적립일이 이미 지났으면 이번 달은 이미 반영된 것으로 본다."""
+    rules = [r for r in get_auto_deposits() if int(r["cash_id"]) != int(cash_id)]
+    if amount > 0:
+        prev = date(today.year - 1, 12, 1) if today.month == 1 else date(today.year, today.month - 1, 1)
+        last = _ym(today) if today.day >= day else _ym(prev)
+        rules.append({"cash_id": int(cash_id), "amount": float(amount), "day": int(day), "last": last})
+    set_setting(AUTO_DEPOSIT_KEY, rules)
+
+
+def apply_auto_deposits(today: date) -> list[dict]:
+    """적립일이 지난 달만큼 현금성 자산 잔액을 늘린다. 여러 번 불러도 한 달에 한 번만 더한다.
+
+    돌려주는 값: [{name, months: [...], added}] — 화면 알림용."""
+    rules = get_auto_deposits()
+    if not rules:
+        return []
+    due = []
+    for r in rules:
+        months = _due_months(r.get("last"), int(r.get("day") or 1), today)
+        if months:
+            r["last"] = months[-1]
+            due.append((r, months))
+    if not due:
+        return []
+    set_setting(AUTO_DEPOSIT_KEY, rules)   # 먼저 '넣었음'을 기록해 두 번 더해지지 않게 한다
+    db = get_client()
+    done = []
+    for r, months in due:
+        rows = db.table("cash_balances").select("*").eq("id", int(r["cash_id"])).execute().data
+        if not rows:
+            continue
+        added = float(r["amount"]) * len(months)
+        db.table("cash_balances").update({"amount": float(rows[0]["amount"] or 0) + added,
+                                          "updated_at": datetime.now().isoformat()}).eq("id", int(r["cash_id"])).execute()
+        done.append({"name": rows[0]["name"], "months": months, "added": added})
+    return done
 
 
 def list_snapshots() -> pd.DataFrame:
