@@ -355,3 +355,108 @@ def test_strategy_memo_merged_and_editable():
     assert not at.exception
     row = next(r for r in fakes.TABLES["target_allocation"] if r["asset_class"] == "S&P 500")
     assert row["strategy"] is None and row["target_weight"] == 60   # 메모만 지우고 자산군은 남김
+
+
+def test_delete_target_rows():
+    seed()
+    at = run("portfolio")
+    assert not at.exception
+    assert at.button(key="targets-del-btn").disabled
+    at.multiselect(key="targets-del").set_value(["S&P 500"]).run()
+    assert not at.exception
+    assert any("미분류" in w.value for w in at.warning)       # 이 자산군에 종목이 있다는 안내
+    at.button(key="targets-del-btn").click().run()
+    assert not at.exception
+    names = [r["asset_class"] for r in fakes.TABLES["target_allocation"]]
+    assert "S&P 500" not in names and "금" in names
+    assert at.multiselect(key="targets-del").value == []
+    spym = next(a for a in fakes.TABLES["assets"] if a["symbol"] == "SPYM")
+    assert spym["asset_class"] == pf.UNCLASSIFIED                 # 종목은 미분류로
+    assert any(t["symbol"] == "SPYM" for t in fakes.TABLES["transactions"])   # 거래는 그대로
+
+
+def test_rename_target_moves_assets_and_cash():
+    seed()
+    original = pf.list_targets()
+    edited = original[["asset_class", "target_weight", "monthly_contribution", "target_return", "strategy"]].copy()
+    edited.loc[0, "asset_class"] = "미국 S&P"
+    edited.loc[2, "asset_class"] = "현금"
+    pf.save_targets(edited, original)
+    assert [r["asset_class"] for r in sorted(fakes.TABLES["target_allocation"], key=lambda r: r["sort_order"])] == \
+        ["미국 S&P", "금", "현금"]
+    assert next(a for a in fakes.TABLES["assets"] if a["symbol"] == "SPYM")["asset_class"] == "미국 S&P"
+    assert fakes.TABLES["cash_balances"][0]["asset_class"] == "현금"
+    # 표에서 행을 지우면 그 자산군 종목은 미분류로
+    pf.save_targets(edited.drop(index=1), pf.list_targets())
+    assert next(a for a in fakes.TABLES["assets"] if a["symbol"].endswith("금현물"))["asset_class"] == pf.UNCLASSIFIED
+
+
+def test_settings_strategy_edit_shows_in_memo():
+    seed()
+    at = run("portfolio")
+    assert at.text_area(key="memo-S&P 500").value == "ISA 위주\n\n적립식"
+    # 설정 표에서 전략을 바꿔 저장한 것과 같게 DB를 바꾸고 다시 그리면 메모 칸도 바뀐다
+    pf.save_strategy("S&P 500", "설정에서 바꾼 전략")
+    at.run()
+    assert not at.exception
+    assert at.text_area(key="memo-S&P 500").value == "설정에서 바꾼 전략"
+
+
+def test_due_months_and_auto_deposit():
+    assert pf._due_months("2026-11", 1, date(2026, 11, 30)) == []
+    assert pf._due_months("2026-11", 1, date(2026, 12, 1)) == ["2026-12"]
+    assert pf._due_months("2026-10", 5, date(2027, 1, 4)) == ["2026-11", "2026-12"]
+    assert pf._due_months("2026-12", 1, date(2027, 2, 1)) == ["2027-01", "2027-02"]
+    seed()
+    pf.set_auto_deposit(1, 100000, 1, date(2026, 11, 9))       # 이번 달은 이미 들어간 것으로 본다
+    assert pf.apply_auto_deposits(date(2026, 11, 30)) == []
+    assert fakes.TABLES["cash_balances"][0]["amount"] == 1000000
+    done = pf.apply_auto_deposits(date(2027, 1, 2))
+    assert done[0]["months"] == ["2026-12", "2027-01"] and done[0]["added"] == 200000
+    assert fakes.TABLES["cash_balances"][0]["amount"] == 1200000
+    assert pf.apply_auto_deposits(date(2027, 1, 20)) == []        # 같은 달 두 번 넣지 않음
+    pf.set_auto_deposit(1, 0, 1, date(2027, 1, 20))
+    assert pf.get_auto_deposits() == []
+
+
+def test_auto_deposit_ui_and_apply_on_open():
+    seed()
+    fakes.TABLES["app_settings"].append({"key": pf.AUTO_DEPOSIT_KEY, "value": [
+        {"cash_id": 1, "amount": 100000, "day": 1, "last": "2020-01"}]})
+    at = run("portfolio")
+    assert not at.exception
+    row = fakes.TABLES["cash_balances"][0]
+    assert row["amount"] > 1000000                                 # 밀린 달만큼 더해짐
+    rule = pf.get_auto_deposits()[0]
+    at2 = run("portfolio")
+    assert fakes.TABLES["cash_balances"][0]["amount"] == row["amount"]   # 다시 열어도 그대로
+    assert pf.get_auto_deposits()[0]["last"] == rule["last"]
+    at2.number_input(key="auto-amt-1").set_value(50000)
+    at2.button(key="auto-save").click().run()
+    assert not at2.exception
+    assert pf.get_auto_deposits()[0]["amount"] == 50000
+
+
+def test_month_end_script_target_month():
+    from datetime import datetime
+    from scripts.month_end_snapshot import target_month
+    none = lambda m: False  # noqa: E731
+    assert target_month(datetime(2026, 11, 30, 23, 59), none) == date(2026, 11, 1)
+    assert target_month(datetime(2026, 11, 29, 23, 59), none) is None
+    assert target_month(datetime(2026, 12, 1, 0, 20), none) == date(2026, 11, 1)        # 늦게 실행
+    assert target_month(datetime(2026, 12, 1, 0, 20), lambda m: True) is None           # 이미 저장됨
+    assert target_month(datetime(2027, 2, 28, 23, 59), none) == date(2027, 2, 1)
+    assert target_month(datetime(2026, 11, 9, 10, 0), none, force=True) == date(2026, 11, 1)
+
+
+def test_month_end_summary_saves_snapshot():
+    from lib import valuation
+    seed()
+    s = valuation.current_summary(date(2026, 11, 30))
+    pf.save_snapshot(date(2026, 11, 30), s)
+    snaps = pf.list_snapshots()
+    assert set(snaps["asset_class"]) >= {"S&P 500", "금", "투자유보현금"}
+    at = run("portfolio")
+    assert not at.exception
+    at.segmented_control(key="snap-view").set_value("자산군별").run()
+    assert not at.exception

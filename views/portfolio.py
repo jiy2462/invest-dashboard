@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -8,13 +9,13 @@ import streamlit as st
 from lib import portfolio as pf
 from lib import ui
 from lib import symbols
-from lib import market
 from lib import trade_inbox as ib
+from lib import valuation
 
 UP, DOWN = ui.UP, ui.DOWN              # 한국식: 이익 빨강, 손실 파랑
 BAR, INK, MUTED = ui.BLUE, ui.ink(), ui.GRAY3
 CURRENCIES = ["KRW", "USD", "JPY", "EUR", "CNY", "HKD"]
-MANUAL = "MANUAL:"                       # 티커 없는 자산(예: KRX 금현물)의 티커 앞머리
+MANUAL = valuation.MANUAL               # 티커 없는 자산(예: KRX 금현물)의 티커 앞머리
 NEW_SEARCH, NEW_MANUAL = "__search__", "__manual__"
 
 st.title("포트폴리오")
@@ -26,10 +27,18 @@ try:
     targets = pf.list_targets()
     cash_all = pf.list_cash()
     goal_total = float(pf.get_setting("goal_total", 0) or 0)
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+    auto_rules = pf.get_auto_deposits()
+    deposited = pf.apply_auto_deposits(today) if auto_rules else []
+    if deposited:
+        cash_all = pf.list_cash()
+        auto_rules = pf.get_auto_deposits()
 except Exception:
     st.error("DB에 연결하지 못했어요. Secrets를 확인하고, Supabase에 `supabase/002_portfolio.sql`이 적용됐는지 확인해 주세요.")
     st.stop()
 
+for d in deposited:
+    st.toast(f"{d['name']}에 자동 적립 ₩{d['added']:,.0f}를 더했어요 ({', '.join(d['months'])}).")
 acc_name = dict(zip(accounts["id"], accounts["name"]))
 asset_info = assets.set_index("symbol").to_dict("index") if not assets.empty else {}
 asset_class = {s: (i["asset_class"] if pd.notna(i.get("asset_class")) and i.get("asset_class") else pf.UNCLASSIFIED)
@@ -51,6 +60,17 @@ def money(values: pd.Series, ccy: pd.Series | str) -> pd.Series:
 
 def won(v: float) -> str:
     return f"{'+' if v > 0 else '−' if v < 0 else ''}₩{abs(v):,.0f}"
+
+
+# 그래프는 보기 전용: 길게 누르기·드래그·두 번 탭으로 확대되지 않게 한다.
+STATIC = {"displayModeBar": False, "scrollZoom": False, "doubleClick": False, "showAxisDragHandles": False}
+
+
+def no_zoom(fig: go.Figure) -> go.Figure:
+    fig.update_layout(dragmode=False)
+    fig.update_xaxes(fixedrange=True)
+    fig.update_yaxes(fixedrange=True)
+    return fig
 
 
 # 범주 색 (고정 순서, 순환하지 않음). 8번째부터는 ‘기타’로 묶는다.
@@ -81,33 +101,10 @@ def donut(parts: pd.DataFrame, total: float) -> go.Figure:
     return fig
 
 
-def fx_ticker(ccy: str) -> str:
-    return "KRW=X" if ccy == "USD" else f"{ccy}KRW=X"
-
-
 # ── 시세·환율 ───────────────────────────────────────────────
 ccys = (set(tx_all["currency"].dropna()) | set(cash_all["currency"].dropna()) | {"USD"}) - {"KRW"}
-net_qty = tx_all.assign(q=tx_all["quantity"].where(tx_all["side"] == "buy", -tx_all["quantity"].where(
-    tx_all["side"] == "sell", 0))).groupby("symbol")["q"].sum() if not tx_all.empty else pd.Series(dtype=float)
-held_syms = set(net_qty[net_qty > 1e-9].index)  # 다 판 종목은 시세를 받지 않는다
-quoted = sorted(s for s in held_syms if not s.startswith(MANUAL))
 with st.spinner("시세 불러오는 중…"):
-    try:
-        closes = market.fetch_yf_closes(tuple(sorted(set(quoted) | {fx_ticker(c) for c in ccys})))
-    except Exception:
-        closes = pd.DataFrame()
-last = {c: float(closes[c].dropna().iloc[-1]) for c in closes.columns if not closes[c].dropna().empty}
-fx = {c: last[fx_ticker(c)] for c in ccys if fx_ticker(c) in last}
-prices, price_src = {}, {}
-for s in held_syms:
-    manual = (asset_info.get(s) or {}).get("manual_price")
-    auto = market.auto_price(s) if s.startswith(MANUAL) else None
-    if s in last and not s.startswith(MANUAL):
-        prices[s], price_src[s] = last[s], "시세"
-    elif auto:
-        prices[s], price_src[s] = auto, "시세(네이버)"
-    elif manual is not None and not pd.isna(manual):
-        prices[s], price_src[s] = float(manual), "직접 입력"
+    fx, prices, price_src = valuation.quote_prices(tx_all, cash_all, asset_info)
 
 # ── 상단: 계좌 필터, 원화 보기 ─────────────────────────────
 f1, f2 = st.columns([3, 1])
@@ -119,7 +116,6 @@ tx = tx_all[tx_all["account_id"].isin(sel_acc)] if sel_acc else tx_all
 cash = cash_all if not sel_acc else cash_all[cash_all["account_id"].isin(sel_acc)]
 positions, events = pf.compute_positions(tx, fx)
 valued = pf.value_positions(positions, prices, fx)
-today = date.today()
 month_buys = pf.month_buys_by_class(tx, asset_class, today, fx)
 summary = pf.class_summary(valued, asset_class, cash, targets, fx, goal_total or None, month_buys)
 
@@ -209,7 +205,7 @@ with tab_hold:
                 pd.DataFrame({"label": held["symbol"].map(name_of), "value": held["value_krw"]}),
                 pd.DataFrame({"label": cash["name"], "value": pf.cash_krw(cash, fx)}),
             ]).groupby("label", as_index=False)["value"].sum().sort_values("value", ascending=False)
-        g1.plotly_chart(donut(parts, total_value), width="stretch", config={"displayModeBar": False}, key="pie")
+        g1.plotly_chart(donut(parts, total_value), width="stretch", config=STATIC, key="pie")
         with g2:
             legend = parts.assign(비중=parts["value"] / parts["value"].sum() * 100).sort_values("value", ascending=False)
             st.dataframe(pd.DataFrame({"": legend["label"], "금액": legend["value"].round(0), "비중": legend["비중"]}),
@@ -274,20 +270,49 @@ with tab_hold:
         st.rerun()
     if sel_acc:
         st.caption("계좌 필터와 상관없이 전체 현금성 자산을 편집해요.")
+    cash_names = dict(zip(cash_all["id"], cash_all["name"]))
+    rule_by_id = {int(r["cash_id"]): r for r in auto_rules if int(r["cash_id"]) in cash_names}
+    for cid, r in rule_by_id.items():
+        st.caption(f"🔁 {cash_names[cid]}: 매월 {int(r['day'])}일 ₩{float(r['amount']):,.0f} 자동 적립 "
+                   f"(마지막 반영 {r['last']})")
+    if not cash_all.empty:
+        with st.expander("매월 자동 적립 (적금 자동이체 등)"):
+            st.caption("정한 날이 지나면 앱을 열 때(또는 월말 자동 기록 때) 그 달 금액을 잔액에 한 번 더해요. "
+                       "이번 달 날짜가 이미 지났으면 이번 달은 이미 들어간 것으로 보고 다음 달부터 더해요.")
+            a1, a2, a3 = st.columns([2, 2, 1])
+            ad_id = a1.selectbox("현금성 자산", list(cash_names), key="auto-cash", format_func=lambda i: cash_names[i])
+            cur = rule_by_id.get(int(ad_id), {})
+            ad_amt = a2.number_input("매월 금액 (원)", min_value=0.0, step=10000.0, format="%.0f",
+                                     value=float(cur.get("amount", 100000.0)), key=f"auto-amt-{ad_id}",
+                                     help="0으로 저장하면 자동 적립을 꺼요")
+            ad_day = a3.number_input("매월 며칠", min_value=1, max_value=28, step=1,
+                                     value=int(cur.get("day", 1)), key=f"auto-day-{ad_id}")
+            if st.button("자동 적립 저장", key="auto-save", type="primary"):
+                pf.set_auto_deposit(int(ad_id), ad_amt, int(ad_day), today)
+                st.toast("자동 적립을 껐어요." if ad_amt <= 0 else
+                         f"{cash_names[ad_id]}: 매월 {int(ad_day)}일 ₩{ad_amt:,.0f} 자동 적립을 저장했어요.")
+                st.rerun()
     st.markdown("**자산군별 전략 메모**")
-    st.caption("펼쳐서 내용을 고치고 저장하거나, 메모를 삭제할 수 있어요. 삭제해도 자산군과 목표 비중은 그대로예요.")
+    st.caption("펼쳐서 내용을 고치고 저장하거나, 메모를 삭제할 수 있어요. 삭제해도 자산군과 목표 비중은 그대로예요. "
+               "‘설정 → 자산군·목표 비중’ 표의 ‘전략’ 칸과 같은 내용이라 어느 쪽에서 고쳐도 함께 바뀌어요.")
     notes = targets[targets["strategy"].notna()]
     for _, t in notes.iterrows():
         cls = t["asset_class"]
         with st.expander(cls):
-            txt = st.text_area("전략", t["strategy"], key=f"memo-{cls}", height=160, label_visibility="collapsed")
+            # 설정 탭 표에서 전략을 바꾸면 여기 입력칸도 새 내용으로 바꾼다(입력칸이 예전 글을 들고 있지 않게).
+            seen = st.session_state.setdefault("memo-seen", {})
+            if seen.get(cls) != t["strategy"]:
+                st.session_state[f"memo-{cls}"] = seen[cls] = t["strategy"]
+            txt = st.text_area("전략", key=f"memo-{cls}", height=160, label_visibility="collapsed")
             m1, m2, _ = st.columns([1, 1, 5])
             if m1.button("저장", key=f"memo-save-{cls}", type="primary", disabled=txt == t["strategy"]):
                 pf.save_strategy(cls, txt)
+                st.session_state.pop("targets-editor", None)
                 st.toast(f"{cls} 전략을 저장했어요.")
                 st.rerun()
             if m2.button("삭제", key=f"memo-del-{cls}"):
                 pf.save_strategy(cls, None)
+                st.session_state.pop("targets-editor", None)
                 st.toast(f"{cls} 전략 메모를 지웠어요.")
                 st.rerun()
     free = [c for c in targets["asset_class"] if c not in set(notes["asset_class"])]
@@ -297,6 +322,7 @@ with tab_hold:
             n_txt = st.text_area("전략", key="memo-new-text", height=120)
             if st.button("추가", key="memo-add", disabled=not n_txt.strip()):
                 pf.save_strategy(n_cls, n_txt)
+                st.session_state.pop("targets-editor", None)
                 st.rerun()
     elif targets.empty:
         st.caption("설정 탭에서 자산군을 먼저 만들면 메모를 쓸 수 있어요.")
@@ -352,28 +378,71 @@ with tab_buy:
 
 
 # ── 자산 배분·리밸런싱 ─────────────────────────────────────
+def gap_label(d: float) -> tuple[str, str]:
+    """목표 대비 차이 문구와 색. 0.5%p 안쪽은 '목표대로'."""
+    if abs(d) < 0.5:
+        return "목표대로", ui.GREEN
+    return (f"{d:+.1f}%p 많음", ui.ORANGE) if d > 0 else (f"{d:+.1f}%p 부족", DOWN)
+
+
 def weight_chart(df: pd.DataFrame) -> go.Figure:
-    """현재 비중(막대)과 목표 비중(세로 눈금)."""
-    df = df.iloc[::-1]
+    """자산군마다 '지금' 막대와 '목표' 막대를 나란히, 이름 아래에 얼마나 많거나 부족한지."""
+    df = df.iloc[::-1].reset_index(drop=True)
+    labels = []
+    for c, d in zip(df["asset_class"], df["weight"] - df["target_weight"]):
+        txt, color = gap_label(d)
+        labels.append(f"<b>{c}</b><br><span style='color:{color}'>{txt}</span>")
     fig = go.Figure()
-    fig.add_bar(y=df["asset_class"], x=df["weight"], orientation="h", name="현재 비중",
-                marker=dict(color=BAR, cornerradius=4), width=0.55,
-                hovertemplate="%{y}<br>현재 %{x:.1f}%<extra></extra>")
-    fig.add_scatter(y=df["asset_class"], x=df["target_weight"], mode="markers", name="목표 비중",
-                    marker=dict(symbol="line-ns", size=22, line=dict(width=3, color=INK)),
-                    hovertemplate="%{y}<br>목표 %{x:.1f}%<extra></extra>")
-    fig.update_layout(height=60 + 44 * len(df), margin=dict(l=0, r=30, t=10, b=0),
-                      legend=dict(orientation="h", y=1.08, x=0), bargap=0.3,
-                      xaxis=dict(ticksuffix="%", gridcolor="rgba(128,128,128,.15)", zeroline=False),
+    fig.add_bar(y=labels, x=df["target_weight"], orientation="h", name="목표 비중",
+                marker=dict(color=MUTED, cornerradius=4), text=[f"{v:.1f}%" for v in df["target_weight"]],
+                textposition="outside", cliponaxis=False,
+                customdata=df["asset_class"], hovertemplate="%{customdata}<br>목표 %{x:.1f}%<extra></extra>")
+    fig.add_bar(y=labels, x=df["weight"], orientation="h", name="지금 비중",
+                marker=dict(color=BAR, cornerradius=4), text=[f"{v:.1f}%" for v in df["weight"]],
+                textposition="outside", cliponaxis=False,
+                customdata=df["asset_class"], hovertemplate="%{customdata}<br>지금 %{x:.1f}%<extra></extra>")
+    top = float(max(df["weight"].max(), df["target_weight"].max(), 1))
+    fig.update_layout(height=80 + 64 * len(df), margin=dict(l=0, r=10, t=10, b=0), barmode="group",
+                      bargap=0.28, bargroupgap=0.08,
+                      legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0, traceorder="reversed"),
+                      xaxis=dict(ticksuffix="%", range=[0, top * 1.25], gridcolor="rgba(128,128,128,.15)",
+                                 zeroline=False),
+                      yaxis=dict(tickfont=dict(size=12)),
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-    return fig
+    return no_zoom(fig)
+
+
+def snapshot_chart(snaps: pd.DataFrame, by_class: bool) -> go.Figure:
+    """월별 기록 꺾은선: 합계(평가금액·투자원금) 또는 자산군별 평가금액."""
+    fig = go.Figure()
+    if by_class:
+        piv = snaps.pivot_table(index="month", columns="asset_class", values="value_krw", aggfunc="sum").sort_index()
+        order = list(dict.fromkeys(list(targets["asset_class"]) + list(piv.columns)))
+        for i, c in enumerate(x for x in order if x in piv.columns):
+            fig.add_scatter(x=piv.index, y=piv[c], mode="lines+markers", name=c,
+                            line=dict(color=ui.PALETTE[i % len(ui.PALETTE)], width=2), marker=dict(size=6),
+                            hovertemplate="₩%{y:,.0f}")
+    else:
+        tot = snaps.groupby("month")[["value_krw", "cost_krw"]].sum().reset_index()
+        fig.add_scatter(x=tot["month"], y=tot["value_krw"], mode="lines+markers", name="평가금액",
+                        line=dict(color=BAR, width=2.5), marker=dict(size=8), hovertemplate="₩%{y:,.0f}")
+        fig.add_scatter(x=tot["month"], y=tot["cost_krw"], mode="lines+markers", name="투자원금",
+                        line=dict(color=MUTED, width=2, dash="dot"), marker=dict(size=6), hovertemplate="₩%{y:,.0f}")
+    fig.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0), hovermode="x unified",
+                      legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0),
+                      yaxis=dict(tickformat=",.0f", gridcolor="rgba(128,128,128,.15)"),
+                      xaxis=dict(tickformat="%Y-%m", dtick="M1", hoverformat="%Y년 %m월"),
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    return no_zoom(fig)
 
 
 with tab_alloc:
     if summary.empty:
         st.info("‘설정’ 탭에서 자산군과 목표 비중을 정하면 여기서 비교와 리밸런싱을 볼 수 있어요.")
     else:
-        st.plotly_chart(weight_chart(summary), width="stretch", config={"displayModeBar": False}, key="weights")
+        st.plotly_chart(weight_chart(summary), width="stretch", config=STATIC, key="weights")
+        st.caption("자산군마다 위 파란 막대가 지금 비중, 아래 회색 막대가 목표 비중이에요. 이름 아래 글자는 "
+                   "목표보다 얼마나 많은지(주황)·부족한지(파랑)예요. 자산군과 목표 비중은 ‘설정’ 탭과 같아요.")
         table = pd.DataFrame({
             "자산군": summary["asset_class"], "평가금액": summary["value_krw"], "투자원금": summary["cost_krw"],
             "손익": summary["pnl_krw"], "수익률": summary["pnl_pct"], "현재 비중": summary["weight"],
@@ -444,29 +513,20 @@ with tab_alloc:
 
         st.subheader("월별 기록")
         snaps = pf.list_snapshots()
-        s1, s2 = st.columns([1, 3])
-        if s1.button(f"{today:%Y년 %m월} 기록 저장", key="save-snapshot", disabled=bool(sel_acc),
+        st.caption("매달 말일 밤 11시 59분(한국 시간)에 전체 계좌 기준 자산 상태가 자동으로 저장돼요. "
+                   "지금 상태를 바로 남기고 싶으면 아래 버튼을 누르세요 (같은 달은 덮어써요).")
+        if st.button(f"{today:%Y년 %m월} 기록 지금 저장", key="save-snapshot", disabled=bool(sel_acc),
                      help="전체 계좌 기준으로만 저장해요. 같은 달에 다시 누르면 덮어써요."):
             pf.save_snapshot(today, summary)
+            st.toast(f"{today:%Y년 %m월} 기록을 저장했어요.")
             st.rerun()
         if snaps.empty:
-            s2.caption("매달 말에 한 번 저장해 두면 자산 추이를 볼 수 있어요 (시트 ‘전략’ 탭의 월별 열).")
+            st.caption("아직 기록이 없어요. 첫 월말이 지나면 여기에 달마다 꺾은선 그래프가 그려져요.")
         else:
             snaps["month"] = pd.to_datetime(snaps["month"])
-            tot = snaps.groupby("month")[["value_krw", "cost_krw"]].sum().reset_index()
-            fig = go.Figure()
-            fig.add_scatter(x=tot["month"], y=tot["value_krw"], mode="lines+markers", name="평가금액",
-                            line=dict(color=BAR, width=2), marker=dict(size=8),
-                            hovertemplate="%{x|%Y-%m} ₩%{y:,.0f}<extra>평가금액</extra>")
-            fig.add_scatter(x=tot["month"], y=tot["cost_krw"], mode="lines", name="투자원금",
-                            line=dict(color=MUTED, width=2, dash="dot"),
-                            hovertemplate="%{x|%Y-%m} ₩%{y:,.0f}<extra>투자원금</extra>")
-            fig.update_layout(height=280, margin=dict(l=0, r=0, t=10, b=0), hovermode="x unified",
-                              legend=dict(orientation="h", y=1.1, x=0),
-                              yaxis=dict(tickformat=",.0f", gridcolor="rgba(128,128,128,.15)"),
-                              xaxis=dict(tickformat="%Y-%m", dtick="M1"),
-                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-            s2.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key="snapshots")
+            by_class = st.segmented_control("보기", ["합계", "자산군별"], default="합계", key="snap-view",
+                                            label_visibility="collapsed") == "자산군별"
+            st.plotly_chart(snapshot_chart(snaps, by_class), width="stretch", config=STATIC, key="snapshots")
             with st.expander("월별 자산군 금액 표"):
                 st.dataframe(snaps.pivot_table(index="asset_class", columns=snaps["month"].dt.strftime("%Y-%m"),
                                                values="value_krw", aggfunc="sum"),
@@ -752,7 +812,8 @@ with tab_fx:
 # ── 설정 ───────────────────────────────────────────────────
 with tab_set:
     st.subheader("자산군·목표 비중")
-    st.caption("시트 ‘전략’·‘포트폴리오’ 탭의 행이에요. 행을 추가·삭제하고 저장하세요. 순서대로 화면에 보여요.")
+    st.caption("목표 총액은 수익금을 뺀, 내가 적립할 원금의 목표예요. 표에서 행을 추가·수정하고 저장하세요. "
+               "행을 지우려면 아래 ‘자산군 행 삭제’를 쓰세요. 순서대로 화면에 보여요.")
     g = st.number_input("목표 총액 (원)", min_value=0.0, value=goal_total, step=1000000.0, format="%.0f",
                         help="0이면 현재 총액 기준으로 목표금액을 계산해요")
     if g != goal_total and st.button("목표 총액 저장", key="save-goal"):
@@ -770,9 +831,33 @@ with tab_set:
         })
     wsum = pd.to_numeric(edited["target_weight"], errors="coerce").fillna(0).sum()
     st.caption(f"목표 비중 합계 {wsum:g}%" + ("" if abs(wsum - 100) < 0.01 or wsum == 0 else " (100%가 아니에요)"))
-    if st.button("자산군 저장", key="save-targets"):
+    st.caption("자산군 이름을 바꾸면 그 자산군의 종목·현금성 자산도 새 이름으로 옮겨져요. "
+               "‘전략’ 칸은 ‘보유 현황’ 맨 아래 ‘자산군별 전략 메모’와 같은 내용이에요.")
+    if st.button("자산군 저장", key="save-targets", type="primary"):
         pf.save_targets(edited, targets)
+        st.session_state.pop("targets-editor", None)
+        st.toast("자산군·목표 비중을 저장했어요.")
         st.rerun()
+    if not targets.empty:
+        with st.expander("자산군 행 삭제"):
+            st.caption("지울 자산군을 고르고 삭제를 누르세요. 그 행의 목표 비중·월 적립 목표·목표 수익률·전략이 함께 "
+                       "지워져요. 거래 기록은 그대로예요.")
+            del_cls = st.multiselect("삭제할 자산군", class_names, key="targets-del", placeholder="자산군 선택")
+            if del_cls:
+                gone = set(del_cls)
+                used = [name_of(s) for s, c in asset_class.items() if c in gone]
+                used += [str(n) for n, c in zip(cash_all["name"], cash_all["asset_class"]) if c in gone]
+                if used:
+                    st.warning(f"이 자산군에 속한 종목·현금 {len(used)}개({', '.join(used[:5])}"
+                               f"{' 등' if len(used) > 5 else ''})는 지워지지 않고 ‘{pf.UNCLASSIFIED}’로 옮겨져요. "
+                               "아래 ‘종목’ 표나 ‘보유 현황’의 현금성 자산 표에서 다른 자산군으로 바꿀 수 있어요.")
+            if st.button(f"선택한 {len(del_cls)}개 행 삭제" if del_cls else "삭제", key="targets-del-btn",
+                         disabled=not del_cls):
+                pf.delete_targets(del_cls)
+                for k in ("targets-editor", "targets-del"):
+                    st.session_state.pop(k, None)
+                st.toast(f"{', '.join(del_cls)} 행을 삭제했어요.")
+                st.rerun()
 
     st.subheader("종목")
     if assets.empty:

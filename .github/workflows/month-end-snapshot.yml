@@ -1,0 +1,30 @@
+name: 월말 자산 기록
+
+on:
+  schedule:
+    # 한국 시간 매달 28~31일 23:40, 23:59 (UTC 14:40, 14:59). 스크립트가 '오늘이 말일'일 때만 저장한다.
+    # 23:40 실행은 예약이 밀리거나 빠질 때를 대비한 예비. 같은 달은 덮어써서 마지막 실행 값이 남는다.
+    - cron: "40 14 28-31 * *"
+    - cron: "59 14 28-31 * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "말일이 아니어도 이번 달 기록을 지금 저장"
+        type: boolean
+        default: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python scripts/month_end_snapshot.py ${{ inputs.force && '--force' || '' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
