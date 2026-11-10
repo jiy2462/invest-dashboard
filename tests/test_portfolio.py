@@ -188,10 +188,8 @@ def test_portfolio_page_with_data():
     assert at.metric[0].label == "총 평가금액"
     assert any(s.value == "리밸런싱" for s in at.subheader)
     md = " ".join(m.value for m in at.markdown)
-    assert "매수:" in md or "그대로" in md
+    assert "매수" in md or "그대로" in md
     at.toggle[0].set_value(True).run()      # 원화로 보기
-    assert not at.exception
-    [r for r in at.radio if r.label == "방식"][0].set_value("목표 비중에 맞추기 (매도 포함)").run()
     assert not at.exception
     at.multiselect[0].set_value([1]).run()  # ISA 계좌만
     assert not at.exception
