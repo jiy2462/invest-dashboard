@@ -84,3 +84,20 @@ def test_inbox_tab_saves_and_ignores():
     at.button(key="ib-restore-btn").click().run()
     assert next(r for r in fakes.TABLES["trade_inbox"] if r["id"] == 2)["status"] == "pending"
     assert at.selectbox(key="ib2-symbol").value is None  # 못 읽은 종목은 비워 둔다
+
+
+def test_auto_filtered_label_and_restore():
+    seed()
+    fakes.TABLES["trade_inbox"] += [
+        {"id": 5, "received_at": "2026-11-10T15:18:55+00:00", "source": "meritz", "title": None,
+         "body": "메리츠증권\n[알림] SGOV 3주 처리 완료", "status": "ignored", "transaction_id": None,
+         "handled_at": "2026-11-10T15:18:55+00:00", "raw": {"body": "x", "skip_reason": "체결·배당 말을 못 찾음"}},
+    ]
+    assert ib.status_label("ignored", {"skip_reason": "x"}) == "자동 거름"
+    assert ib.status_label("ignored", {"body": "x"}) == "무시함"
+    at = run("portfolio")
+    assert not at.exception
+    table = next(d.value for d in at.dataframe if "상태" in d.value.columns)
+    assert list(table["상태"]) == ["자동 거름"]
+    at.button(key="ib-restore-btn").click().run()
+    assert next(r for r in fakes.TABLES["trade_inbox"] if r["id"] == 5)["status"] == "pending"
