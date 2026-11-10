@@ -131,12 +131,12 @@ def save_targets(edited: pd.DataFrame, original: pd.DataFrame) -> None:
     moved = {old: new for old, new in renames.items() if old not in keep}
     for old, new in moved.items():
         _move_class(old, new)
-    if moved:   # 적립 계획의 '따로 두는 자산군'(투자유보현금) 이름도 따라 바꾼다
+    if moved:   # 적립 계획의 '나눠 투입할 현금 자산군'(투자유보현금) 이름도 따라 바꾼다
         plan = get_setting("dca_plan")
-        if isinstance(plan, dict) and isinstance(plan.get("reserve"), list):
-            names = [moved.get(c, c) for c in plan["reserve"]]
-            if names != plan["reserve"]:
-                set_setting("dca_plan", {**plan, "reserve": names})
+        if isinstance(plan, dict) and isinstance(plan.get("cash_classes"), list):
+            names = [moved.get(c, c) for c in plan["cash_classes"]]
+            if names != plan["cash_classes"]:
+                set_setting("dca_plan", {**plan, "cash_classes": names})
     gone = set(original["asset_class"]) - keep
     for name in gone:
         db.table("target_allocation").delete().eq("asset_class", name).execute()

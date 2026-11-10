@@ -53,54 +53,55 @@ def test_schedule_constant_weekly_budget():
 
 # ── 계산 ────────────────────────────────────────────────────
 
-def test_split_reserve_recomputes_weights_among_invest_assets():
-    s = summary_fixture({"주식": 600, "금": 200, "투자유보현금": 200}, {"주식": 60, "금": 20, "투자유보현금": 5})
-    inv, res = pl.split_reserve(s, ["투자유보현금"])
-    inv = inv.set_index("asset_class")
-    assert list(res["asset_class"]) == ["투자유보현금"] and res["weight"].iloc[0] == pytest.approx(20)
-    assert inv.loc["주식", "weight"] == pytest.approx(75) and inv.loc["주식", "target_weight"] == pytest.approx(75)
-    assert inv["target_weight"].sum() == pytest.approx(100)
-    both, none = pl.split_reserve(s, [])                       # 따로 두는 자산군이 없으면 전부 투자 자산
-    assert len(both) == 3 and none.empty
-
-
-def test_weekly_plan_reaches_target_and_excludes_reserve():
-    s = summary_fixture({"주식": 500, "금": 100, "투자유보현금": 300}, {"주식": 50, "금": 50, "투자유보현금": 5})
-    inv, _ = pl.split_reserve(s, ["투자유보현금"])
+def test_weekly_plan_reaches_target():
+    s = summary_fixture({"주식": 500, "금": 100}, {"주식": 50, "금": 50})
     sched = pl.schedule(plan_of(months=1, monthly_deposit=400, start="2026-11-09"), date(2026, 11, 9))
     n = len(sched["remaining"])
-    w = pl.weekly_plan(inv, sched).set_index("asset_class")
-    assert "투자유보현금" not in w.index
+    w = pl.weekly_plan(s, sched).set_index("asset_class")
     assert w["weekly"].sum() == pytest.approx(sched["per_buy"])
     assert w.loc["금", "weekly"] == pytest.approx(400 / n) and w.loc["주식", "weekly"] == pytest.approx(0)
     assert w.loc["금", "end_weight"] == pytest.approx(50)       # (500, 500) → 목표 비중 도달
-    # 시세가 그대로면 다음 주에도 같은 금액이 나온다
-    inv2 = pl.project(inv, w.reset_index(), sched, sched["remaining"][1])
+    inv2 = pl.project(s, w.reset_index(), sched, sched["remaining"][1])   # 시세 그대로면 다음 주도 같은 금액
     sched2 = pl.schedule(plan_of(months=1, monthly_deposit=400, start="2026-11-09"), sched["remaining"][1])
     w2 = pl.weekly_plan(inv2, sched2).set_index("asset_class")
     assert w2.loc["금", "weekly"] == pytest.approx(w.loc["금", "weekly"])
 
 
+def test_cash_with_zero_target_is_spread_over_period():
+    # 유보현금 목표 0% → 300을 남은 매수일에 똑같이 꺼내 부족한 자산군에 넣는다
+    s = summary_fixture({"주식": 500, "금": 100, "투자유보현금": 300}, {"주식": 50, "금": 50, "투자유보현금": 0})
+    sched = pl.schedule(plan_of(months=1, monthly_deposit=100, start="2026-11-09"), date(2026, 11, 9))
+    n = len(sched["remaining"])
+    w = pl.weekly_plan(s, sched, ["투자유보현금"]).set_index("asset_class")
+    assert w.loc["투자유보현금", "weekly"] == pytest.approx(-300 / n)
+    assert w.loc["투자유보현금", "cash_out"] == pytest.approx(300 / n)
+    assert w.loc["투자유보현금", "end_value"] == pytest.approx(0)
+    assert w.loc["금", "total_buy"] == pytest.approx(400)              # 새 돈 100 + 꺼낸 현금 300
+    assert w["total_buy"].sum() == pytest.approx(100)                   # 전체로는 새로 넣은 돈만큼 늘어남
+    assert w.loc["금", "end_weight"] == pytest.approx(50)
+    # 현금 자산군으로 고르지 않으면 꺼내지 않고 그냥 함께 계산한다(현금은 그대로)
+    plain = pl.weekly_plan(s, sched, []).set_index("asset_class")
+    assert plain.loc["투자유보현금", "weekly"] == 0 and plain["cash_out"].sum() == 0
+
+
+def test_cash_with_target_only_excess_is_spread():
+    # 목표 10%: 목표일 총액 1000(지금 900 + 새 돈 100)의 10% = 100만 남기고 200을 나눠 꺼낸다
+    s = summary_fixture({"주식": 500, "금": 100, "현금": 300}, {"주식": 45, "금": 45, "현금": 10})
+    sched = pl.schedule(plan_of(months=1, monthly_deposit=100, start="2026-11-09"), date(2026, 11, 9))
+    w = pl.weekly_plan(s, sched, ["현금"]).set_index("asset_class")
+    assert w.loc["현금", "total_buy"] == pytest.approx(-200)
+    assert w.loc["현금", "end_weight"] == pytest.approx(10)
+    assert w["end_value"].sum() == pytest.approx(1000)
+
+
 def test_weekly_plan_overweight_class_gets_nothing_and_plan_over():
     s = summary_fixture({"주식": 900, "금": 50, "채권": 50}, {"주식": 50, "금": 25, "채권": 25})
     sched = pl.schedule(plan_of(months=1, monthly_deposit=200, start="2026-11-09"), date(2026, 11, 9))
-    w = pl.weekly_plan(pl.split_reserve(s, [])[0], sched).set_index("asset_class")
+    w = pl.weekly_plan(s, sched).set_index("asset_class")
     assert w.loc["주식", "weekly"] == 0 and w.loc["주식", "end_weight"] > 50      # 적립만으로는 못 맞춤
     assert w.loc["금", "total_buy"] == pytest.approx(100)
     ended = pl.schedule(plan_of(months=1, start="2026-01-01"), date(2026, 11, 9))
-    assert pl.weekly_plan(pl.split_reserve(s, [])[0], ended)["weekly"].sum() == 0
-
-
-def test_deploy_reserve_cash():
-    s = summary_fixture({"주식": 600, "금": 200, "채권": 200}, {"주식": 50, "금": 30, "채권": 20})
-    inv, _ = pl.split_reserve(s, [])
-    auto = pl.deploy(inv, 200).set_index("asset_class")
-    assert auto.loc["금", "trade_krw"] == pytest.approx(160) and auto.loc["채권", "trade_krw"] == pytest.approx(40)
-    one = pl.deploy(inv, 200, ["주식"]).set_index("asset_class")           # 하락한 자산군을 직접 고름
-    assert one.loc["주식", "trade_krw"] == pytest.approx(200) and one["trade_krw"].sum() == pytest.approx(200)
-    assert one.loc["주식", "after_weight"] == pytest.approx(800 / 1200 * 100)
-    two = pl.deploy(inv, 100, ["금", "채권"]).set_index("asset_class")
-    assert two.loc["금", "trade_krw"] == pytest.approx(100 * 130 / 150) and two.loc["주식", "trade_krw"] == 0
+    assert pl.weekly_plan(s, ended)["weekly"].sum() == 0
 
 
 def test_symbol_trades_split_by_holding_value():
@@ -121,14 +122,14 @@ def test_symbol_trades_split_by_holding_value():
 def test_plan_save_load_and_defaults():
     seed()
     p = pl.load_plan(pf.list_targets())
-    assert p["start"] is None and p["monthly_deposit"] == 1500000 and p["reserve"] == ["투자유보현금"]
+    assert p["start"] is None and p["monthly_deposit"] == 1500000 and p["cash_classes"] == ["투자유보현금"]
     pl.save_plan({**p, "months": 9, "weekday": 2, "lump_sum": 5000000}, date(2026, 11, 10))
     q = pl.load_plan(pf.list_targets())
     assert (q["months"], q["weekday"], q["lump_sum"], q["start"]) == (9, 2, 5000000, date(2026, 11, 10))
     assert pl.clean_plan({"months": 0, "weekday": 9, "monthly_deposit": -5, "start": "x"})["months"] == 1
 
 
-def test_save_targets_keeps_monthly_and_renames_reserve_in_plan():
+def test_save_targets_keeps_monthly_and_renames_cash_class_in_plan():
     seed()
     pl.save_plan(pl.load_plan(pf.list_targets()), date(2026, 11, 10))
     original = pf.list_targets()
@@ -138,7 +139,7 @@ def test_save_targets_keeps_monthly_and_renames_reserve_in_plan():
     pf.save_targets(edited, original)
     rows = {r["asset_class"]: r for r in fakes.TABLES["target_allocation"]}
     assert rows["S&P 500"]["target_weight"] == 80 and rows["S&P 500"]["monthly_contribution"] == 1000000
-    assert pl.load_plan()["reserve"] == ["유보현금"]
+    assert pl.load_plan()["cash_classes"] == ["유보현금"]
 
 
 # ── 화면 ────────────────────────────────────────────────────
@@ -148,12 +149,12 @@ def frames(at, col):
 
 
 def test_settings_plan_table_and_save():
-    seed()
+    seed()                                   # 목표 60/20/20, 유보현금(RP) 100만원
     at = run("portfolio")
     assert not at.exception
     assert any(s.value == "적립 계획" for s in at.subheader)
     table = frames(at, "남은 기간 합계")[0]
-    assert list(table["자산군"]) == ["S&P 500", "금"]                       # 투자유보현금은 빠짐
+    assert "투자유보현금" in list(table["자산군"])                          # 함께 계산
     md = " ".join(m.value for m in at.markdown)
     assert "요일에 살 금액" in md
     at.number_input(key="plan-months").set_value(12)
@@ -163,36 +164,44 @@ def test_settings_plan_table_and_save():
     assert not at.exception
     assert any("저장하지 않은" in c.value or "저장한 적립 계획이 없어요" in c.value for c in at.caption)
     table = frames(at, "남은 기간 합계")[0]
-    total = 2000000 * 12 + 4000000
-    assert table["남은 기간 합계"].sum() == pytest.approx(total, abs=2)
+    assert table["남은 기간 합계"].sum() == pytest.approx(2000000 * 12 + 4000000, abs=5)
     at.button(key="save-plan").click().run()
     assert not at.exception
-    saved = fakes.TABLES["app_settings"][-1]
-    assert saved["key"] == pl.PLAN_KEY
-    assert (saved["value"]["months"], saved["value"]["weekday"], saved["value"]["monthly_deposit"],
-            saved["value"]["lump_sum"]) == (12, 4, 2000000, 4000000)
-    assert saved["value"]["start"]
-    assert at.button(key="save-plan").disabled                              # 저장 뒤에는 바뀐 것이 없음
+    saved = next(r for r in fakes.TABLES["app_settings"] if r["key"] == pl.PLAN_KEY)["value"]
+    assert (saved["months"], saved["weekday"], saved["monthly_deposit"], saved["lump_sum"]) == \
+        (12, 4, 2000000, 4000000)
+    assert saved["start"] and saved["cash_classes"] == ["투자유보현금"]
+    assert at.button(key="save-plan").disabled
 
-    at.multiselect(key="plan-reserve").set_value([]).run()                  # 유보현금도 함께 계산
+
+def test_settings_zero_cash_target_spreads_reserve():
+    seed()
+    for r in fakes.TABLES["target_allocation"]:
+        r["target_weight"] = {"S&P 500": 70, "금": 30, "투자유보현금": 0}[r["asset_class"]]
+    at = run("portfolio")
     assert not at.exception
-    assert "투자유보현금" in list(frames(at, "남은 기간 합계")[0]["자산군"])
+    table = frames(at, "남은 기간 합계")[0].set_index("자산군")
+    assert table.loc["투자유보현금", "남은 기간 합계"] == pytest.approx(-1000000, abs=2)   # RP 100만원 전부 투입
+    assert table.loc["투자유보현금", "목표일 예상 비중"] == pytest.approx(0, abs=0.01)
+    md = " ".join(m.value for m in at.markdown)
+    assert "꺼내는 돈" in md
+    at.multiselect(key="plan-cash").set_value([]).run()                    # 현금 자산군 지정 해제
+    table = frames(at, "남은 기간 합계")[0].set_index("자산군")
+    assert table.loc["투자유보현금", "남은 기간 합계"] == 0
 
 
-def test_alloc_tab_reserve_card_and_rebalance():
+def test_alloc_tab_rebalance_includes_reserve():
     seed()
     at = run("portfolio")
     assert not at.exception
     subs = [s.value for s in at.subheader]
-    assert "투자유보현금" in subs and "리밸런싱" in subs
+    assert "리밸런싱" in subs
     md = " ".join(m.value for m in at.markdown)
-    assert "다음 리밸런싱" in md and "지금 쓸 수 있는 유보현금" in md and "₩1,000,000" in md
+    assert "다음 리밸런싱" in md
     rb = next(d.value for d in at.dataframe if "매수/매도" in d.value.columns and "현재 금액" in d.value.columns)
-    assert list(rb["자산군"]) == ["S&P 500", "금"]
+    assert list(rb["자산군"]) == ["S&P 500", "금", "투자유보현금"]
     assert rb["매수/매도"].sum() == pytest.approx(0, abs=2)                   # 판 만큼 산다
-    assert rb["이후 비중"].round(1).tolist() == [75.0, 25.0]                 # 60:20 → 유보현금 빼고 75:25
-    assert "**매도**" in md and "**매수**" in md
-
+    assert rb["이후 비중"].round(1).tolist() == [60.0, 20.0, 20.0]
     at.number_input(key="rebal-extra").set_value(1000000).run()
     assert not at.exception
     rb = next(d.value for d in at.dataframe if "매수/매도" in d.value.columns and "현재 금액" in d.value.columns)
@@ -200,11 +209,3 @@ def test_alloc_tab_reserve_card_and_rebalance():
     at.segmented_control(key="rebal-basis").set_value("리밸런싱 날 예상").run()
     assert not at.exception
     assert any("예상 금액" in d.value.columns for d in at.dataframe)
-
-    at.number_input(key="dip-amount").set_value(500000).run()               # 하락 시 유보현금 매수
-    assert not at.exception
-    dip = [d.value for d in at.dataframe if "매수/매도" in d.value.columns][0]
-    assert dip["매수/매도"].sum() == pytest.approx(500000, abs=2)
-    at.multiselect(key="dip-classes").set_value(["금"]).run()
-    dip = [d.value for d in at.dataframe if "매수/매도" in d.value.columns][0]
-    assert list(dip["자산군"]) == ["금"] and dip["매수/매도"].iloc[0] == 500000
