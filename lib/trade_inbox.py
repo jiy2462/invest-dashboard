@@ -137,7 +137,7 @@ def parse(title: str | None, body: str, source: str, assets: pd.DataFrame, recei
     ccy = (info.get(sym) or {}).get("currency") if sym else None
     if not ccy:
         ccy = "USD" if re.search(r"\$|USD|달러", text) else "KRW"
-    qty = _first([rf"(?:체결\s*)?수량\s*[:：]?\s*{_NUM}", rf"{_NUM}\s*주(?![가-힣])",
+    qty = _first([rf"체결\s*수량\s*[:：]?\s*{_NUM}", rf"수량\s*[:：]?\s*{_NUM}", rf"{_NUM}\s*주(?![가-힣])",
                   rf"{_NUM}\s*(?:{re.escape(sym.split('-')[0]) if sym else 'BTC'})\b"], text)
     price = _first([rf"(?:체결\s*)?(?:단가|체결가|가격|평균가|평균\s*체결가)\s*[:：]?\s*(?:USD|\$)?\s*{_NUM}",
                     rf"@\s*(?:USD|\$)?\s*{_NUM}"], text)

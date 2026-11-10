@@ -101,3 +101,13 @@ def test_auto_filtered_label_and_restore():
     assert list(table["상태"]) == ["자동 거름"]
     at.button(key="ib-restore-btn").click().run()
     assert next(r for r in fakes.TABLES["trade_inbox"] if r["id"] == 5)["status"] == "pending"
+
+
+def test_parse_real_meritz_overseas_fill():
+    # 2026-11-10 실제 메리츠증권 카톡 알림 형식 (주문수량보다 체결수량을 쓴다)
+    body = ("메리츠증권\n[메리츠증권] 해외주식 주문체결 안내\n\n계좌명 : 장*영\n계좌번호 : 3030**93-01\n"
+            "종목명 : ISHARES 0-3M TREASURY BOND(SGOV)\n매매구분 : 매도\n체결단가 : USD 100.5100\n"
+            "주문수량 : 5주\n체결수량 : 3주\n체결금액 : USD 301.53\n체결일자 : 11/10")
+    g = ib.parse(None, body, "meritz", ASSETS, datetime(2026, 11, 11, 0, 18, tzinfo=ib.KST))
+    assert (g["side"], g["symbol"], g["quantity"], g["price"], g["currency"], g["trade_date"]) == \
+        ("sell", "SGOV", 3, 100.51, "USD", date(2026, 11, 10))
