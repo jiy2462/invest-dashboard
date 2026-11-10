@@ -84,3 +84,30 @@ def test_inbox_tab_saves_and_ignores():
     at.button(key="ib-restore-btn").click().run()
     assert next(r for r in fakes.TABLES["trade_inbox"] if r["id"] == 2)["status"] == "pending"
     assert at.selectbox(key="ib2-symbol").value is None  # 못 읽은 종목은 비워 둔다
+
+
+def test_auto_filtered_label_and_restore():
+    seed()
+    fakes.TABLES["trade_inbox"] += [
+        {"id": 5, "received_at": "2026-11-10T15:18:55+00:00", "source": "meritz", "title": None,
+         "body": "메리츠증권\n[알림] SGOV 3주 처리 완료", "status": "ignored", "transaction_id": None,
+         "handled_at": "2026-11-10T15:18:55+00:00", "raw": {"body": "x", "skip_reason": "체결·배당 말을 못 찾음"}},
+    ]
+    assert ib.status_label("ignored", {"skip_reason": "x"}) == "자동 거름"
+    assert ib.status_label("ignored", {"body": "x"}) == "무시함"
+    at = run("portfolio")
+    assert not at.exception
+    table = next(d.value for d in at.dataframe if "상태" in d.value.columns)
+    assert list(table["상태"]) == ["자동 거름"]
+    at.button(key="ib-restore-btn").click().run()
+    assert next(r for r in fakes.TABLES["trade_inbox"] if r["id"] == 5)["status"] == "pending"
+
+
+def test_parse_real_meritz_overseas_fill():
+    # 2026-11-10 실제 메리츠증권 카톡 알림 형식 (주문수량보다 체결수량을 쓴다)
+    body = ("메리츠증권\n[메리츠증권] 해외주식 주문체결 안내\n\n계좌명 : 장*영\n계좌번호 : 3030**93-01\n"
+            "종목명 : ISHARES 0-3M TREASURY BOND(SGOV)\n매매구분 : 매도\n체결단가 : USD 100.5100\n"
+            "주문수량 : 5주\n체결수량 : 3주\n체결금액 : USD 301.53\n체결일자 : 11/10")
+    g = ib.parse(None, body, "meritz", ASSETS, datetime(2026, 11, 11, 0, 18, tzinfo=ib.KST))
+    assert (g["side"], g["symbol"], g["quantity"], g["price"], g["currency"], g["trade_date"]) == \
+        ("sell", "SGOV", 3, 100.51, "USD", date(2026, 11, 10))

@@ -5,7 +5,7 @@
 // 회사: JSON "source" 또는 주소 끝 `&source=upbit|kis|meritz|nh` (없으면 내용으로 짐작).
 // 본문: JSON {"title": "...", "subtitle": "...", "body": "..."} / 폼 / 그냥 글자 모두 받는다.
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { rejectReason } from "./filter.ts";
+import { judge } from "./filter.ts";
 
 const SOURCES: [RegExp, string][] = [
   [/업비트|upbit/i, "upbit"],
@@ -73,9 +73,13 @@ Deno.serve(async (req: Request) => {
   const raw = { ...data };
   delete raw.token;
 
-  // 증권사·업비트 체결/배당 알림이 아니면 저장하지 않는다(카톡 광고, 다른 채널, 카드 결제 등).
-  const skip = rejectReason(source, title, body);
-  if (skip) return reply(200, { ok: true, skipped: true, reason: skip });
+  // 다른 카톡 채널(광고·결제 등)은 저장하지 않고, 증권사 알림인데 체결·배당 말을 못 찾으면
+  // '무시함'으로 저장해 둔다(놓친 체결을 '처리한 알림'에서 되돌릴 수 있게).
+  const verdict = judge(source, title, body);
+  console.log(JSON.stringify({ source, action: verdict.action, reason: verdict.reason ?? null }));
+  if (verdict.action === "drop") return reply(200, { ok: true, skipped: true, reason: verdict.reason });
+  const held = verdict.action === "hold";
+  if (held) raw.skip_reason = verdict.reason;
 
   const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
     auth: { persistSession: false },
@@ -88,8 +92,11 @@ Deno.serve(async (req: Request) => {
   if (dup && dup.length) return reply(200, { ok: true, duplicate: true, id: dup[0].id });
 
   const { data: row, error } = await db.from("trade_inbox")
-    .insert({ source, title: title || null, body: body || title, raw })
+    .insert({
+      source, title: title || null, body: body || title, raw,
+      ...(held ? { status: "ignored", handled_at: new Date().toISOString() } : {}),
+    })
     .select("id").single();
   if (error) return reply(500, { ok: false, error: error.message });
-  return reply(200, { ok: true, id: row.id, source });
+  return reply(200, { ok: true, id: row.id, source, held });
 });

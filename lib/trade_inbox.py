@@ -15,7 +15,7 @@ from lib.db import get_client
 
 KST = timezone(timedelta(hours=9))
 SOURCES = {"upbit": "업비트", "kis": "한국투자증권", "meritz": "메리츠증권", "nh": "NH투자증권", "other": "기타"}
-COLUMNS = ["id", "received_at", "source", "title", "body", "status", "transaction_id", "handled_at"]
+COLUMNS = ["id", "received_at", "source", "title", "body", "status", "transaction_id", "handled_at", "raw"]
 
 _NUM = r"([\d,]+(?:\.\d+)?)"
 
@@ -29,6 +29,13 @@ def list_items(status: str | None = "pending") -> pd.DataFrame:
     rows = q.order("received_at", desc=True).limit(200).execute().data
     df = pd.DataFrame(rows, columns=COLUMNS)
     return df.sort_values("received_at", ascending=False, kind="stable") if not df.empty else df
+
+
+def status_label(status: str, raw) -> str:
+    """처리한 알림 표의 상태: 서버가 체결·배당 말을 못 찾아 자동으로 걸러 둔 것은 따로 표시."""
+    if status == "ignored" and isinstance(raw, dict) and raw.get("skip_reason"):
+        return "자동 거름"
+    return {"done": "입력함", "ignored": "무시함", "pending": "대기"}.get(status, status)
 
 
 def mark(item_id: int, status: str, transaction_id: int | None = None) -> None:
@@ -130,7 +137,7 @@ def parse(title: str | None, body: str, source: str, assets: pd.DataFrame, recei
     ccy = (info.get(sym) or {}).get("currency") if sym else None
     if not ccy:
         ccy = "USD" if re.search(r"\$|USD|달러", text) else "KRW"
-    qty = _first([rf"(?:체결\s*)?수량\s*[:：]?\s*{_NUM}", rf"{_NUM}\s*주(?![가-힣])",
+    qty = _first([rf"체결\s*수량\s*[:：]?\s*{_NUM}", rf"수량\s*[:：]?\s*{_NUM}", rf"{_NUM}\s*주(?![가-힣])",
                   rf"{_NUM}\s*(?:{re.escape(sym.split('-')[0]) if sym else 'BTC'})\b"], text)
     price = _first([rf"(?:체결\s*)?(?:단가|체결가|가격|평균가|평균\s*체결가)\s*[:：]?\s*(?:USD|\$)?\s*{_NUM}",
                     rf"@\s*(?:USD|\$)?\s*{_NUM}"], text)

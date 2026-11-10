@@ -775,11 +775,13 @@ with tab_inbox:
                     "받은 때": done["received_at"].map(lambda v: f"{ib.received_kst(v):%m/%d %H:%M}"
                                                        if ib.received_kst(v) else ""),
                     "회사": done["source"].map(lambda s: ib.SOURCES.get(s, s)),
-                    "상태": done["status"].map({"done": "입력함", "ignored": "무시함"}),
+                    "상태": [ib.status_label(st_, rw) for st_, rw in zip(done["status"], done["raw"])],
                     "내용": done["body"].astype(str).str.replace("\n", " ").str.slice(0, 80),
                 }), hide_index=True, width="stretch")
                 ignored = done[done["status"] == "ignored"]
                 if not ignored.empty:
+                    st.caption("‘자동 거름’은 증권사 알림인데 체결·배당 말을 못 찾아 대기함에 안 올린 거예요. "
+                               "체결 알림이 여기 있으면 아래에서 되돌려 주세요.")
                     back = st.selectbox("무시한 알림 되돌리기", list(ignored["id"]), key="ib-restore",
                                         format_func=lambda i: str(ignored.set_index("id").loc[i, "body"])[:40])
                     if st.button("대기함으로 되돌리기", key="ib-restore-btn"):
