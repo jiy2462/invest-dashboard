@@ -1,14 +1,16 @@
-"""적립 계획(매주 적립액), 투자유보현금 분리, 정기 리밸런싱 날짜 계산.
+"""적립 계획(매주 적립액), 투자유보현금 나눠 넣기, 정기 리밸런싱 날짜 계산.
 
 적립 계획은 app_settings 의 'dca_plan' 하나에 저장한다(표를 새로 만들지 않는다):
-  {months, weekday(0=월), monthly_deposit, lump_sum, start("YYYY-MM-DD"), reserve([자산군 이름])}
+  {months, weekday(0=월), monthly_deposit, lump_sum, start("YYYY-MM-DD"), cash_classes([자산군 이름])}
 계산 함수는 DB·네트워크 없이 pandas만으로 동작한다.
 
 생각 방식
 - 매주 쓸 돈(합계) = (월 입금액 × 개월 수 + 목돈) ÷ 계획 기간의 전체 매수 횟수. 기간 내내 같다.
 - 남은 적립금 = 매주 합계 × 남은 매수 횟수. 지금 평가액에 이 돈을 더한 총액이 목표 비중이 되도록
   부족한 자산군에 나눈다(매도 없음). 시세가 바뀌면 자산군별 금액만 다시 나뉜다.
-- 투자유보현금(reserve)은 월 입금액·목돈과 별개인 돈이라 비중의 분모와 적립 대상에서 뺀다.
+- 투자유보현금도 다른 자산군과 함께 비중을 계산한다. 다만 현금 자산군(cash_classes)이 목표일 총액 기준
+  목표 금액보다 많으면(목표 비중 0%면 전부) 그 초과분을 목표 기간 동안 매수일마다 똑같이 꺼내
+  부족한 자산군에 넣는다(월 입금액처럼 균등 분할 투입).
 """
 from __future__ import annotations
 
@@ -35,7 +37,7 @@ def default_plan(targets: pd.DataFrame | None = None) -> dict:
         inv = targets[targets["asset_class"] != pf.CASH_CLASS]
         monthly = float(pd.to_numeric(inv["monthly_contribution"], errors="coerce").fillna(0).sum())
     return {"months": 6, "weekday": 0, "monthly_deposit": monthly, "lump_sum": 0.0, "start": None,
-            "reserve": [pf.CASH_CLASS]}
+            "cash_classes": [pf.CASH_CLASS]}
 
 
 def clean_plan(raw: dict | None, targets: pd.DataFrame | None = None) -> dict:
@@ -46,7 +48,8 @@ def clean_plan(raw: dict | None, targets: pd.DataFrame | None = None) -> dict:
     plan["weekday"] = int(pf._num(plan["weekday"])) % 7
     plan["monthly_deposit"] = max(0.0, pf._num(plan["monthly_deposit"]))
     plan["lump_sum"] = max(0.0, pf._num(plan["lump_sum"]))
-    plan["reserve"] = [str(c) for c in (plan["reserve"] if isinstance(plan["reserve"], list) else [])]
+    cc = plan["cash_classes"]
+    plan["cash_classes"] = [str(c) for c in (cc if isinstance(cc, list) else [])]
     try:
         plan["start"] = date.fromisoformat(str(plan["start"])[:10]) if plan["start"] else None
     except ValueError:
@@ -120,75 +123,50 @@ def rebalance_dates(today: date, count: int = 2, months=REBALANCE_MONTHS,
     return out
 
 
-# ── 투자 자산 / 투자유보현금 나누기 ─────────────────────────
-
-def split_reserve(summary: pd.DataFrame, reserve) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """자산군 요약을 (투자 자산, 유보 자산)으로 나눈다.
-
-    투자 자산의 현재 비중·목표 비중은 투자 자산끼리(유보현금 제외) 100% 기준으로 다시 계산한다.
-    유보 자산의 weight 는 전체 자산 대비 비중 그대로 둔다.
-    """
-    is_res = summary["asset_class"].isin(list(reserve or []))
-    inv, res = summary[~is_res].copy(), summary[is_res].copy()
-    total = float(inv["value_krw"].sum())
-    inv["weight"] = inv["value_krw"] / total * 100 if total else 0.0
-    w = pd.to_numeric(inv["target_weight"], errors="coerce").fillna(0).clip(lower=0)
-    inv["target_weight"] = w / w.sum() * 100 if w.sum() > 0 else 0.0
-    inv["diff_pp"] = inv["weight"] - inv["target_weight"]
-    return inv.reset_index(drop=True), res.reset_index(drop=True)
-
-
 # ── 매주 적립액 ─────────────────────────────────────────────
 
-def weekly_plan(invest: pd.DataFrame, sched: dict) -> pd.DataFrame:
-    """자산군별 매주 적립액.
+def cash_excess(summary: pd.DataFrame, cash_classes, final_total: float) -> pd.Series:
+    """현금 자산군마다 목표일 총액 기준 목표 금액을 넘는 금액(나눠 투입할 돈). 목표 0%면 전부."""
+    w = pd.to_numeric(summary["target_weight"], errors="coerce").fillna(0).clip(lower=0)
+    w = w / w.sum() if w.sum() > 0 else w * 0
+    excess = (summary["value_krw"] - final_total * w).clip(lower=0)
+    return excess.where(summary["asset_class"].isin(list(cash_classes or [])), 0.0)
 
-    열: asset_class, value_krw, weight, target_weight, total_buy(남은 기간 합계), weekly(매주),
-        end_value, end_weight(목표일 예상, 시세가 그대로일 때)
+
+def weekly_plan(summary: pd.DataFrame, sched: dict, cash_classes=()) -> pd.DataFrame:
+    """자산군별 매주 적립액. 현금 자산군의 초과분은 남은 매수일에 똑같이 나눠 꺼낸다(weekly 가 −).
+
+    열: asset_class, value_krw, weight, target_weight, total_buy(남은 기간 합계, −는 꺼내 쓸 돈),
+        weekly(매주), cash_out(그중 현금에서 꺼내는 몫), end_value, end_weight(목표일 예상, 시세 그대로)
     """
     n = len(sched["remaining"])
-    r = pf.rebalance(invest, float(sched["remaining_money"]) if n else 0.0, allow_sell=False)
+    new = float(sched["remaining_money"]) if n else 0.0
+    total = float(summary["value_krw"].sum())
+    excess = cash_excess(summary, cash_classes, total + new) if n else summary["value_krw"] * 0.0
+    adj = summary.copy()
+    adj["value_krw"] = adj["value_krw"] - excess          # 꺼낼 돈은 미리 빼고, 넣을 돈에 더한다
+    r = pf.rebalance(adj, new + float(excess.sum()), allow_sell=False)
+    trade = r["trade_krw"] - excess.values
+    end = summary["value_krw"].values + trade
+    end_total = float(end.sum())
     return pd.DataFrame({
-        "asset_class": r["asset_class"], "value_krw": r["value_krw"], "weight": r["weight"],
-        "target_weight": r["target_weight_norm"], "total_buy": r["trade_krw"],
-        "weekly": r["trade_krw"] / n if n else 0.0, "end_value": r["after_krw"], "end_weight": r["after_weight"],
+        "asset_class": summary["asset_class"].values, "value_krw": summary["value_krw"].values,
+        "weight": summary["value_krw"].values / total * 100 if total else 0.0,
+        "target_weight": r["target_weight_norm"].values, "total_buy": trade,
+        "weekly": trade / n if n else 0.0, "cash_out": excess.values / n if n else 0.0,
+        "end_value": end, "end_weight": end / end_total * 100 if end_total else 0.0,
     })
 
 
-def project(invest: pd.DataFrame, weekly: pd.DataFrame, sched: dict, until: date) -> pd.DataFrame:
-    """until 전날까지 계획대로 적립했다고 보고(시세 그대로) 자산군 금액을 더한 요약."""
+def project(summary: pd.DataFrame, weekly: pd.DataFrame, sched: dict, until: date) -> pd.DataFrame:
+    """until 전날까지 계획대로 적립했다고 보고(시세 그대로) 자산군 금액을 바꾼 요약."""
     k = sum(1 for d in sched["remaining"] if d < until)
     add = weekly.set_index("asset_class")["weekly"] * k
-    out = invest.copy()
+    out = summary.copy()
     out["value_krw"] = out["value_krw"] + out["asset_class"].map(add).fillna(0.0)
     total = float(out["value_krw"].sum())
     out["weight"] = out["value_krw"] / total * 100 if total else 0.0
     return out
-
-
-# ── 유보현금으로 매수(하락 시) ──────────────────────────────
-
-def deploy(invest: pd.DataFrame, amount: float, classes=None) -> pd.DataFrame:
-    """유보현금 amount 를 투자 자산에 넣을 때의 자산군별 매수 금액.
-
-    classes 가 비면 목표보다 부족한 자산군에 부족한 만큼씩 나눈다. classes 를 고르면 그 자산군에만
-    넣는다(부족분 비율대로, 부족분이 없으면 목표 비중 비율대로, 그것도 없으면 똑같이).
-    돌려주는 열은 pf.rebalance 와 같다.
-    """
-    if not classes:
-        return pf.rebalance(invest, amount, allow_sell=False)
-    r = pf.rebalance(invest, amount, allow_sell=True)   # gap 계산용
-    picked = r["asset_class"].isin(list(classes))
-    key = r["trade_krw"].clip(lower=0).where(picked, 0.0)
-    if key.sum() <= 0:
-        key = r["target_weight_norm"].where(picked, 0.0)
-    if key.sum() <= 0:
-        key = picked.astype(float)
-    r["trade_krw"] = key / key.sum() * amount if key.sum() > 0 else 0.0
-    r["after_krw"] = r["value_krw"] + r["trade_krw"]
-    after_total = float(r["after_krw"].sum())
-    r["after_weight"] = r["after_krw"] / after_total * 100 if after_total else 0.0
-    return r
 
 
 # ── 종목별로 나누기 ─────────────────────────────────────────

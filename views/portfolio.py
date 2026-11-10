@@ -125,13 +125,16 @@ valued = pf.value_positions(positions, prices, fx)
 month_buys = pf.month_buys_by_class(tx, asset_class, today, fx)
 summary = pf.class_summary(valued, asset_class, cash, targets, fx, goal_total or None, month_buys)
 
-# 투자 자산(비중은 투자 자산끼리 계산)과 투자유보현금을 나누고, 저장한 적립 계획으로 매주 적립액을 계산한다.
-invest, reserve_df = pl.split_reserve(summary, plan["reserve"])
-reserve_set = set(plan["reserve"])
-bought_today = bool(((tx["side"] == "buy") & (tx["trade_date"] == today)
-                     & ~tx["symbol"].map(lambda s: asset_class.get(s, pf.UNCLASSIFIED)).isin(reserve_set)).any())
+# 투자유보현금도 함께 비중을 계산한다(목표 비중 합이 100이 아니면 100 기준으로 맞춤).
+# 저장한 적립 계획으로 매주 적립액을 계산하고, 목표보다 많은 현금 자산군은 기간 동안 나눠 투입한다.
+invest = summary.copy()
+_w = pd.to_numeric(invest["target_weight"], errors="coerce").fillna(0).clip(lower=0)
+invest["target_weight"] = _w / _w.sum() * 100 if _w.sum() > 0 else 0.0
+invest["diff_pp"] = invest["weight"] - invest["target_weight"]
+cash_set = set(plan["cash_classes"])
+bought_today = bool(((tx["side"] == "buy") & (tx["trade_date"] == today)).any())
 sched = pl.schedule(plan, today, bought_today)
-weekly = pl.weekly_plan(invest, sched)
+weekly = pl.weekly_plan(summary, sched, plan["cash_classes"])
 
 total_value = float(summary["value_krw"].sum())
 total_cost = float(summary["cost_krw"].sum())
@@ -479,20 +482,18 @@ with tab_alloc:
         st.info("‘설정’ 탭에서 자산군과 목표 비중을 정하면 여기서 비교와 리밸런싱을 볼 수 있어요.")
     else:
         has_target = float(invest["target_weight"].sum()) > 0
-        raw_wsum = float(pd.to_numeric(targets.loc[~targets["asset_class"].isin(reserve_set), "target_weight"],
-                                       errors="coerce").fillna(0).sum())
+        raw_wsum = float(pd.to_numeric(targets["target_weight"], errors="coerce").fillna(0).sum())
         st.subheader("자산 배분")
         # 보유도 목표도 없는 자산군(예: 다 판 자산군)은 그래프·표에서 뺀다.
         invest = invest[(invest["value_krw"] > 0) | (invest["target_weight"] > 0)].reset_index(drop=True)
         if invest.empty:
-            st.caption("투자 자산이 없어요. ‘설정 → 적립 계획’에서 따로 두는 자산군을 확인해 주세요.")
+            st.caption("보유 자산이 없어요.")
         else:
             st.plotly_chart(weight_chart(invest), width="stretch", config=STATIC, key="weights")
             st.caption("자산군마다 위 파란 막대가 지금 비중, 아래 회색 막대가 목표 비중이에요. 이름 아래 글자는 "
-                       "목표보다 얼마나 많은지(주황)·부족한지(파랑)예요."
-                       + (f" 비중은 {'·'.join(plan['reserve'])}을 뺀 투자 자산끼리 계산해요." if reserve_set else ""))
+                       "목표보다 얼마나 많은지(주황)·부족한지(파랑)예요. 투자유보현금도 함께 계산해요.")
             if has_target and abs(raw_wsum - 100) > 0.01:
-                st.caption(f"투자 자산의 목표 비중 합이 {raw_wsum:g}%라서 100% 기준으로 다시 계산했어요.")
+                st.caption(f"목표 비중 합이 {raw_wsum:g}%라서 100% 기준으로 다시 계산했어요.")
             table = pd.DataFrame({
                 "자산군": invest["asset_class"], "평가금액": invest["value_krw"], "투자원금": invest["cost_krw"],
                 "손익": invest["pnl_krw"], "수익률": invest["pnl_pct"], "현재 비중": invest["weight"],
@@ -512,45 +513,6 @@ with tab_alloc:
             st.caption(("목표금액 = 목표 총액 × 목표 비중" if goal_total else "목표금액 = 현재 총액 × 목표 비중 "
                         "(‘설정’에서 목표 총액을 넣으면 그 기준으로 바뀌어요)") + " · 금액은 모두 원화")
 
-        # ── 투자유보현금: 월 입금액·목돈과 별개, 하락 시 매수에 쓰는 돈 ──
-        if reserve_set:
-            st.subheader(" · ".join(plan["reserve"]))
-            reserve_total = float(reserve_df["value_krw"].sum())
-            res_target = float(reserve_df["target_weight"].sum())
-            share = reserve_total / total_value * 100 if total_value else 0.0
-            with ui.card("reserve"):
-                st.markdown(ui.stat("지금 쓸 수 있는 유보현금", f"₩{reserve_total:,.0f}",
-                                f"전체 자산의 {share:.1f}%" + (f" · 목표 {res_target:g}%" if res_target else ""),
-                                    ui.tok("muted")), unsafe_allow_html=True)
-                st.caption("매주 적립(월 입금액·목돈)과 별개로, 어떤 자산군이 하락할 때 매수에 쓰는 돈이에요. "
-                           "그래서 위 비중·매주 적립액·리밸런싱 계산에는 넣지 않아요.")
-                held_now = valued[valued["quantity"] > 0] if not valued.empty else valued
-                parts = pd.concat([
-                    pd.DataFrame({"이름": held_now["symbol"].map(name_of), "금액": held_now["value_krw"],
-                                  "c": held_now["symbol"].map(lambda s: asset_class.get(s, pf.UNCLASSIFIED))}),
-                    pd.DataFrame({"이름": cash["name"], "금액": pf.cash_krw(cash, fx), "c": cash["asset_class"]}),
-                ])
-                parts = parts[parts["c"].isin(reserve_set) & (parts["금액"] > 0)]
-                if not parts.empty:
-                    st.dataframe(parts[["이름", "금액"]].assign(금액=parts["금액"].round(0)), hide_index=True,
-                                 width="stretch", column_config={"금액": NUM})
-                with st.expander("하락한 자산군을 유보현금으로 살 때 계산"):
-                    d1, d2 = st.columns([1, 2])
-                    dip_amt = d1.number_input("유보현금에서 쓸 금액 (원)", min_value=0.0, step=100000.0, format="%.0f",
-                                              value=0.0, key="dip-amount")
-                    dip_cls = d2.multiselect("살 자산군", list(invest["asset_class"]), key="dip-classes",
-                                             placeholder="비워 두면 목표보다 부족한 자산군에 나눠요")
-                    if dip_amt > reserve_total + 0.5:
-                        st.warning(f"유보현금(₩{reserve_total:,.0f})보다 큰 금액이에요.")
-                    if dip_amt <= 0:
-                        st.caption("쓸 금액을 넣으면 자산군별 매수 금액과 매수 뒤 비중을 보여 줘요.")
-                    elif not has_target and not dip_cls:
-                        st.info("목표 비중을 먼저 정하거나 살 자산군을 골라 주세요.")
-                    else:
-                        dip = pl.deploy(invest, dip_amt, dip_cls)
-                        trade_table(dip[dip["trade_krw"] > 0.5], "dip-table")
-                        st.caption(f"매수 뒤 남는 유보현금 ₩{max(reserve_total - dip_amt, 0):,.0f}")
-
         # ── 정기 리밸런싱: 매년 2월·8월 마지막 주 월요일 ──
         st.subheader("리밸런싱")
         nxt, after = pl.rebalance_dates(today, 2)
@@ -559,8 +521,8 @@ with tab_alloc:
             st.markdown(ui.stat("다음 리밸런싱", kdate(nxt),
                             ("오늘이에요" if dday == 0 else f"D-{dday}") + f" · 그다음 {kdate(after)}",
                             ui.ORANGE if dday <= 7 else ui.tok("muted")), unsafe_allow_html=True)
-            st.caption("매년 2월과 8월의 마지막 주 월요일에, 투자 자산을 목표 비중으로 되돌려요. "
-                       "많은 자산군을 팔아 부족한 자산군을 사요.")
+            st.caption("매년 2월과 8월의 마지막 주 월요일에, 투자유보현금을 포함한 전체 자산을 목표 비중으로 되돌려요. "
+                       "많은 자산군을 팔아(현금은 꺼내) 부족한 자산군을 사요.")
         if invest.empty or not has_target:
             st.info("목표 비중을 먼저 정해 주세요.")
         else:
@@ -611,7 +573,7 @@ with tab_alloc:
         acc_tbl = summary[["asset_class", "month_bought"]].merge(weekly[["asset_class", "weekly"]], on="asset_class",
                                                                  how="left").fillna({"weekly": 0.0})
         acc_tbl["month_plan"] = acc_tbl["month_bought"] + acc_tbl["weekly"] * left_this_month
-        acc_tbl = acc_tbl[(acc_tbl["month_plan"] > 0.5) & ~acc_tbl["asset_class"].isin(reserve_set)]
+        acc_tbl = acc_tbl[acc_tbl["month_plan"] > 0.5]
         if acc_tbl.empty:
             st.caption("‘설정 → 적립 계획’에서 월 입금액을 넣으면 매주 적립액과 이번 달 매수 금액을 비교해 보여 줘요.")
         else:
@@ -937,19 +899,19 @@ with tab_set:
                                   format_func=lambda i: f"매주 {pl.WEEKDAYS[i]}요일")
         in_monthly = p3.number_input("월 입금액 목표 (원)", min_value=0.0, step=100000.0, format="%.0f",
                                      value=float(plan["monthly_deposit"]), key="plan-monthly",
-                                     help="매달 새로 넣을 수 있는 돈의 합계 (투자유보현금 제외)")
+                                     help="매달 새로 넣을 수 있는 돈의 합계 (이미 가진 투자유보현금 제외)")
         in_lump = p4.number_input("추가 목돈 (원)", min_value=0.0, step=1000000.0, format="%.0f",
                                   value=float(plan["lump_sum"]), key="plan-lump",
                                   help="한 번에 생겨 더 넣을 수 있는 돈. 남은 매수 횟수에 고르게 나눠 넣어요. 없으면 0")
-        in_reserve = st.multiselect(
-            "따로 두는 자산군 (투자유보현금)", class_names, key="plan-reserve",
-            default=[c for c in plan["reserve"] if c in class_names],
-            help="월 입금액·목돈과 별개로 두고 하락 때 매수에 쓰는 돈. 비중과 매주 적립액 계산에서 빼요. "
-                 "비워 두면 모든 자산군을 함께 계산해요.")
+        in_cash = st.multiselect(
+            "나눠 투입할 현금 자산군", class_names, key="plan-cash",
+            default=[c for c in plan["cash_classes"] if c in class_names],
+            help="다른 자산군과 함께 비중을 계산하되, 목표 비중보다 많이 있는 금액(목표 0%면 전부)을 "
+                 "목표 기간 동안 매수일마다 똑같이 나눠 꺼내 부족한 자산군을 사요.")
         live = {**plan, "months": int(in_months), "weekday": int(in_weekday), "monthly_deposit": float(in_monthly),
-                "lump_sum": float(in_lump), "reserve": list(in_reserve)}
+                "lump_sum": float(in_lump), "cash_classes": list(in_cash)}
         plan_changed = any(live[k] != plan[k] for k in ("months", "weekday", "monthly_deposit", "lump_sum")) \
-            or set(live["reserve"]) != {c for c in plan["reserve"] if c in class_names}
+            or set(live["cash_classes"]) != {c for c in plan["cash_classes"] if c in class_names}
         if plan_changed or plan["start"] is None:
             live["start"] = None       # 저장하면 오늘부터 새로 시작하므로, 미리 보기도 오늘부터로 계산
         if st.button("적립 계획 저장", key="save-plan", type="primary",
@@ -977,11 +939,9 @@ with tab_set:
             "strategy": st.column_config.TextColumn("전략", width="large"),
         })
     e_w = pd.to_numeric(edited["target_weight"], errors="coerce").fillna(0)
-    e_res = edited["asset_class"].isin(in_reserve)
-    inv_sum, res_sum = float(e_w[~e_res].sum()), float(e_w[e_res].sum())
-    st.caption(f"투자 자산 목표 비중 합계 {inv_sum:g}%"
-               + ("" if abs(inv_sum - 100) < 0.01 or inv_sum == 0 else " (100%가 아니라서 100% 기준으로 다시 계산해요)")
-               + (f" · {'·'.join(in_reserve)} {res_sum:g}%는 따로 (전체 자산 대비 목표)" if in_reserve else ""))
+    wsum = float(e_w.sum())
+    st.caption(f"목표 비중 합계 {wsum:g}% (투자유보현금 포함)"
+               + ("" if abs(wsum - 100) < 0.01 or wsum == 0 else " · 100%가 아니라서 100% 기준으로 다시 계산해요"))
 
     # 적립 계획 결과: 위 입력값과 방금 표에 쓴 목표 비중(저장 전이어도)으로 계산해 위 카드에 채운다.
     saved_w = dict(zip(targets["asset_class"], pd.to_numeric(targets["target_weight"], errors="coerce").fillna(0)))
@@ -994,9 +954,8 @@ with tab_set:
         s_live = pd.concat([s_live, pd.DataFrame({"asset_class": new_rows, "value_krw": 0.0,
                                                   "target_weight": [live_w[c] for c in new_rows]})],
                            ignore_index=True)
-    inv_live, _ = pl.split_reserve(s_live, live["reserve"])
     sched_live = pl.schedule(live, today, bought_today)
-    weekly_live = pl.weekly_plan(inv_live, sched_live)
+    weekly_live = pl.weekly_plan(s_live, sched_live, live["cash_classes"])
     with plan_box:
         n_left, n_all = len(sched_live["remaining"]), len(sched_live["dates"])
         if plan["start"] is None:
@@ -1007,12 +966,18 @@ with tab_set:
                        + (" (계획을 저장하면 오늘부터 새로 시작해요)." if plan_changed else " (‘자산군 저장’을 눌러야 반영돼요)."))
         if not n_left:
             st.info(f"목표일({kdate(sched_live['end'])})이 지났어요. 새 목표 기간을 정하고 ‘적립 계획 저장’을 눌러 주세요.")
-        elif float(inv_live["target_weight"].sum()) <= 0:
+        elif float(s_live["target_weight"].sum()) <= 0:
             st.info("아래 표에서 자산군별 목표 비중을 먼저 정해 주세요.")
         else:
+            cash_out = float(weekly_live["cash_out"].sum())
+            cash_label = "·".join(c for c in live["cash_classes"]
+                                  if float(weekly_live.loc[weekly_live["asset_class"] == c, "cash_out"].sum()) > 0.5)
             st.markdown(ui.stat(
-                f"매주 {pl.WEEKDAYS[live['weekday']]}요일에 살 금액 (합계)", f"₩{sched_live['per_buy']:,.0f}",
-                f"다음 매수일 {kdate(sched_live['next'], year=False)} · 남은 매수 {n_left}회 / 전체 {n_all}회 · "
+                f"매주 {pl.WEEKDAYS[live['weekday']]}요일에 살 금액 (합계)",
+                f"₩{sched_live['per_buy'] + cash_out:,.0f}",
+                (f"새로 넣는 돈 ₩{sched_live['per_buy']:,.0f} + {cash_label}에서 꺼내는 돈 ₩{cash_out:,.0f}<br>"
+                 if cash_out > 0.5 else "")
+                + f"다음 매수일 {kdate(sched_live['next'], year=False)} · 남은 매수 {n_left}회 / 전체 {n_all}회 · "
                 f"목표일 {kdate(sched_live['end'])}", ui.tok("muted")), unsafe_allow_html=True)
             show = weekly_live[(weekly_live["value_krw"] > 0) | (weekly_live["target_weight"] > 0)]
             st.dataframe(pd.DataFrame({
@@ -1023,7 +988,8 @@ with tab_set:
             }), hide_index=True, width="stretch", key="plan-table", column_config={
                 "현재 평가액": NUM, "남은 기간 합계": NUM, "현재 비중": WEIGHT, "목표 비중": WEIGHT,
                 "목표일 예상 비중": WEIGHT,
-                "매주 적립액": st.column_config.NumberColumn(format="localized", help="매수일마다 이 자산군에 살 금액 (원)")})
+                "매주 적립액": st.column_config.NumberColumn(
+                    format="localized", help="매수일마다 이 자산군에 살 금액 (원). −는 그 현금 자산군에서 꺼내 쓸 금액")})
             over = show[(show["end_weight"] - show["target_weight"]).abs() > 0.05]
             if not over.empty:
                 big = over[over["end_weight"] > over["target_weight"]]
@@ -1035,8 +1001,9 @@ with tab_set:
                 f"매주 합계 = (월 입금액 ₩{live['monthly_deposit']:,.0f} × {live['months']}개월 + 목돈 "
                 f"₩{live['lump_sum']:,.0f}) ÷ 전체 매수 {n_all}회. 지금 평가액에 남은 적립금 "
                 f"₩{sched_live['remaining_money']:,.0f}을 더한 총액이 목표 비중이 되도록 부족한 자산군에 나눠요. "
-                "시세가 바뀌면 열 때마다 자산군별 금액을 다시 계산하고, 오늘 매수를 기록하면 다음 매수일 기준으로 넘어가요."
-                + (f" {'·'.join(live['reserve'])}은 빼고 계산해요." if live["reserve"] else ""))
+                + (f"{cash_label}은 목표 비중을 넘는 ₩{cash_out * n_left:,.0f}을 남은 {n_left}회에 똑같이 나눠 "
+                   f"꺼내 써요(매주 ₩{cash_out:,.0f}). " if cash_out > 0.5 else "")
+                + "시세가 바뀌면 열 때마다 자산군별 금액을 다시 계산하고, 오늘 매수를 기록하면 다음 매수일 기준으로 넘어가요.")
     st.caption("자산군 이름을 바꾸면 그 자산군의 종목·현금성 자산도 새 이름으로 옮겨져요. "
                "‘전략’ 칸은 ‘보유 현황’ 맨 아래 ‘자산군별 전략 메모’와 같은 내용이에요.")
     if st.button("자산군 저장", key="save-targets", type="primary"):
