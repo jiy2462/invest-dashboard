@@ -116,18 +116,27 @@ def save_targets(edited: pd.DataFrame, original: pd.DataFrame) -> None:
         if not name:
             continue
         keep.add(name)
-        db.table("target_allocation").upsert({
+        payload = {
             "asset_class": name,
             "target_weight": _num(r.get("target_weight")),
-            "monthly_contribution": _num(r.get("monthly_contribution")),
             "target_return": None if pd.isna(r.get("target_return")) else float(r.get("target_return")),
             "status_note": _txt(r.get("status_note")),
             "strategy": _txt(r.get("strategy")),
             "sort_order": i + 1,
-        }, on_conflict="asset_class").execute()
-    for old, new in renames.items():
-        if old not in keep:
-            _move_class(old, new)
+        }
+        # 월 적립 목표는 이제 '적립 계획'(lib/plan.py)이 계산한다. 표에 그 열이 없으면 저장된 값을 그대로 둔다.
+        if "monthly_contribution" in edited.columns:
+            payload["monthly_contribution"] = _num(r.get("monthly_contribution"))
+        db.table("target_allocation").upsert(payload, on_conflict="asset_class").execute()
+    moved = {old: new for old, new in renames.items() if old not in keep}
+    for old, new in moved.items():
+        _move_class(old, new)
+    if moved:   # 적립 계획의 '따로 두는 자산군'(투자유보현금) 이름도 따라 바꾼다
+        plan = get_setting("dca_plan")
+        if isinstance(plan, dict) and isinstance(plan.get("reserve"), list):
+            names = [moved.get(c, c) for c in plan["reserve"]]
+            if names != plan["reserve"]:
+                set_setting("dca_plan", {**plan, "reserve": names})
     gone = set(original["asset_class"]) - keep
     for name in gone:
         db.table("target_allocation").delete().eq("asset_class", name).execute()
@@ -143,7 +152,7 @@ def _move_class(old: str, new: str) -> None:
 
 
 def delete_targets(names) -> None:
-    """설정 표에서 자산군 행(목표 비중·월 적립·목표 수익률·전략)을 지운다.
+    """설정 표에서 자산군 행(목표 비중·목표 수익률·전략)을 지운다.
 
     거래 기록은 그대로 두고, 그 자산군에 속했던 종목·현금성 자산은 '미분류'로 옮긴다."""
     db = get_client()
