@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
@@ -103,7 +104,7 @@ def _date(text: str, fallback: date) -> date:
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", "", str(s)).upper()
+    return re.sub(r"\s+", "", unicodedata.normalize("NFC", str(s))).upper()
 
 
 def match_symbol(text: str, assets: pd.DataFrame) -> str | None:
@@ -130,7 +131,8 @@ def match_symbol(text: str, assets: pd.DataFrame) -> str | None:
 
 def parse(title: str | None, body: str, source: str, assets: pd.DataFrame, received: datetime | None) -> dict:
     """알림 한 건에서 거래 입력값을 추측한다. 못 찾은 값은 None."""
-    text = f"{title or ''}\n{body or ''}"
+    # 단축어가 한글을 자모로 쪼개 보낸 옛 알림(NFD)도 읽도록 보통 한글로 합친다.
+    text = unicodedata.normalize("NFC", f"{title or ''}\n{body or ''}")
     side = _side(text)
     sym = match_symbol(text, assets)
     info = assets.set_index("symbol").to_dict("index") if not assets.empty else {}

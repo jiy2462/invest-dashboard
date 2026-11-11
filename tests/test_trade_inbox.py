@@ -111,3 +111,15 @@ def test_parse_real_meritz_overseas_fill():
     g = ib.parse(None, body, "meritz", ASSETS, datetime(2026, 11, 11, 0, 18, tzinfo=ib.KST))
     assert (g["side"], g["symbol"], g["quantity"], g["price"], g["currency"], g["trade_date"]) == \
         ("sell", "SGOV", 3, 100.51, "USD", date(2026, 11, 10))
+
+
+def test_parse_decomposed_hangul_from_shortcut():
+    """아이폰 단축어가 한글을 자모로 쪼개(NFD) 보낸 실제 메리츠 알림(2026-11-11)도 읽는다."""
+    import unicodedata
+    text = ("메리츠증권\n[메리츠증권] 해외주식 주문체결 안내\n\n종목명 : ISHARES 0-3M TREASURY BOND(SGOV)\n"
+            "매매구분 : 매도\n체결단가 : USD 100.5200\n주문수량 : 1주\n체결수량 : 1주\n체결금액 : USD 100.52\n체결일자 : 11/11")
+    nfd = unicodedata.normalize("NFD", text)
+    assert nfd != text
+    g = ib.parse(None, nfd, "meritz", ASSETS, datetime(2026, 11, 12, 1, 34, tzinfo=ib.KST))
+    assert (g["side"], g["symbol"], g["quantity"], g["price"], g["currency"]) == ("sell", "SGOV", 1, 100.52, "USD")
+    assert g["trade_date"] == date(2026, 11, 11)

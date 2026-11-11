@@ -20,9 +20,11 @@ function detectSource(...texts: string[]): string {
   return "other";
 }
 
+// 아이폰 단축어가 한글을 자모 단위로 쪼갠 꼴(NFD, 예: "ㅊㅔㄱㅕㄹ")로 보낼 때가 있어서
+// (2026-11-11 메리츠 SGOV·QQQM 알림), 받자마자 보통 한글(NFC)로 합친다. 안 그러면 '체결'·'메리츠'를 못 찾는다.
 function str(v: unknown): string {
   if (v === null || v === undefined) return "";
-  return typeof v === "string" ? v : JSON.stringify(v);
+  return (typeof v === "string" ? v : JSON.stringify(v)).normalize("NFC");
 }
 
 function reply(status: number, data: Record<string, unknown>): Response {
