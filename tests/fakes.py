@@ -131,7 +131,8 @@ class FakeClient:
         return _Query(name)
 
 
-BASE = {"^GSPC": 6800, "^KS11": 4000, "KRW=X": 1430, "^TNX": 4.1, "005930.KS": 98000, "AAPL": 270, "SPYM": 86}
+BASE = {"^GSPC": 6800, "^KS11": 4000, "KRW=X": 1430, "^TNX": 4.1, "005930.KS": 98000, "AAPL": 270, "SPYM": 86,
+        "BTC-USD": 75000, "BTC-KRW": 110_000_000}
 
 
 def fake_ohlcv(symbol: str, interval: str, period: str | None = None) -> pd.DataFrame:
@@ -148,6 +149,18 @@ def fake_ohlcv(symbol: str, interval: str, period: str | None = None) -> pd.Data
     return pd.DataFrame({"Open": open_, "High": np.maximum(open_, close) * 1.006,
                          "Low": np.minimum(open_, close) * 0.994, "Close": close,
                          "Volume": rng.integers(1e5, 1e6, len(idx))}, index=idx)
+
+
+def fake_hourly(symbol: str) -> pd.DataFrame:
+    """1시간봉 60일치 (UTC, 시간대 포함). 비트코인처럼 주말에도 이어진다."""
+    if symbol not in BASE:
+        return pd.DataFrame()
+    idx = pd.date_range(end="2026-11-05 22:00", periods=24 * 60, freq="h", tz="UTC")
+    rng = np.random.default_rng(11)
+    close = BASE[symbol] * np.exp(np.cumsum(rng.normal(0, 0.004, len(idx))))
+    open_ = np.r_[close[0], close[:-1]]
+    return pd.DataFrame({"Open": open_, "High": np.maximum(open_, close) * 1.002,
+                         "Low": np.minimum(open_, close) * 0.998, "Close": close}, index=idx)
 
 
 def fake_closes(symbols) -> pd.DataFrame:
@@ -172,6 +185,7 @@ def install() -> None:
     """앱 모듈의 네트워크 함수를 가짜로 바꾼다."""
     import lib.auth as auth
     import lib.backtest as backtest
+    import lib.btc_trading as btc_trading
     import lib.charting as charting
     import lib.fear_greed as fear_greed
     import lib.indicators as indicators
@@ -192,7 +206,10 @@ def install() -> None:
     insight.fetch_page = fake_page
     insight.yt_get = fake_yt_get
     indicators.get_client = watchlist.get_client = portfolio.get_client = backtest.get_client = \
-        trade_inbox.get_client = spending.get_client = pledge.get_client = lambda: FakeClient()
+        trade_inbox.get_client = spending.get_client = pledge.get_client = btc_trading.get_client = \
+        lambda: FakeClient()
+    btc_trading.fetch_hourly = fake_hourly
+    btc_trading.fetch_live = lambda symbol: None
     backtest.fetch_history = fake_history
     backtest.fetch_fred_krw = lambda: fake_history(("DEXKOUS",))["DEXKOUS"]
     market.fetch_yf_closes = fake_closes

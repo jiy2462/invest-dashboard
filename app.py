@@ -59,6 +59,7 @@ pages = [
     st.Page("views/watchlist.py", title="관심종목·차트", icon=":material/candlestick_chart:"),
     st.Page("views/portfolio.py", title="포트폴리오", icon=":material/donut_large:"),
     st.Page("views/backtest.py", title="백테스트", icon=":material/history:"),
+    st.Page("views/btc_trading.py", title="비트코인 트레이딩", icon=":material/currency_bitcoin:"),
     st.Page("views/insight.py", title="오늘의 인사이트", icon=":material/lightbulb:"),
     st.Page("views/spending.py", title="지출관리", icon=":material/receipt_long:"),
 ]
