@@ -20,7 +20,7 @@ ASSET_OPTIONS = [a.label for a in bt.CATALOG.values()] + [DIRECT]
 MAX_SLOTS = 3
 
 st.title("백테스트")
-st.caption("자산군과 비중을 골라 최대 30년 동안 어떻게 됐을지 계산해요. 배당은 재투자한 것으로 보고, "
+st.caption("자산군과 비중을 골라 1970년부터 어떻게 됐을지 계산해요(처음에는 최근 30년). 배당은 재투자한 것으로 보고, "
            "세금·수수료는 빼지 않았어요. 대표 ETF가 생기기 전 기간은 비슷한 펀드나 지수로 이어 붙여요.")
 
 # ── 저장한 조합·내 목표 비중 ─────────────────────────────────
@@ -83,7 +83,7 @@ def load_slot(i: int) -> None:
     p = saved_by_name.get(choice[len(SAVED):]) if choice.startswith(SAVED) else None
     if p:  # 저장할 때의 설정도 불러온다
         if p.get("start_date"):
-            st.session_state["bt_start"] = max(date.fromisoformat(p["start_date"]), min_start)
+            st.session_state["bt_start"] = max(date.fromisoformat(p["start_date"]), bt.EARLIEST)
         if p.get("end_date"):
             st.session_state["bt_end"] = min(date.fromisoformat(p["end_date"]), today)
         if p.get("rebalance") in bt.REBALANCE:
@@ -184,9 +184,9 @@ if saved_runs:
 # ── 설정 ───────────────────────────────────────────────────
 with ui.card("bt-settings"):
     c1, c2, c3, c4 = st.columns(4)
-    start = c1.date_input("시작일", min_value=min_start, max_value=today, key="bt_start",
+    start = c1.date_input("시작일", min_value=bt.EARLIEST, max_value=today, key="bt_start",
                           format="YYYY-MM-DD")
-    end = c2.date_input("종료일", min_value=min_start, max_value=today, key="bt_end",
+    end = c2.date_input("종료일", min_value=bt.EARLIEST, max_value=today, key="bt_end",
                         format="YYYY-MM-DD")
     base = c3.radio("계산 통화", ["KRW", "USD"], horizontal=True, key="bt_base",
                     help="원화로 고르면 미국 자산은 그날 환율로 원화로 바꿔 계산해요(환노출). "
@@ -433,7 +433,8 @@ with t4:
     st.markdown("각 자산이 어느 기간에 어떤 데이터를 썼는지예요. 위 행이 더 오래된 대체 데이터예요.")
     st.dataframe(run.sources, hide_index=True, width="stretch")
     st.caption("지수(^로 시작)는 배당이 빠진 가격이라 실제보다 수익률이 조금 낮게 나와요. "
-               "펀드·ETF는 배당 재투자를 반영한 가격이에요. 원/달러 환율은 야후(2003년 말~)와 미국 연준 FRED(그 이전)를 써요.")
+               "펀드·ETF는 배당 재투자를 반영한 가격이에요. 원/달러 환율은 야후(2003년 말~)와 미국 연준 FRED(그 이전)를 써요. "
+               "2000년 8월 이전 금은 세계은행 월평균 가격이라 한 달에 한 번만 값이 바뀌어요.")
     w = pd.DataFrame([{"조합": r.name, **{bt.label_of(k): v / sum(r.weights.values()) * 100
                                          for k, v in r.weights.items()}} for r in run.results]).set_index("조합")
     st.markdown("**계산에 쓴 비중 (%)**")
