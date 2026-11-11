@@ -83,11 +83,38 @@ def test_run_backtest_30y_60_40_with_spliced_sources_and_fx():
     assert r.stats["mdd"] < 0 and np.isfinite(r.stats["cagr"])
     assert set(res.sources["티커"]) == {"VFINX", "SPY", "VFITX", "IEF"}
     assert r.other.notna().all()                               # 달러 환산
-    # 금이 들어가면 2000-08-30부터로 밀린다
+    # 금도 2000년 8월 이전은 세계은행 월평균 가격으로 채워서 30년 그대로 간다
     ports.append(bt.Portfolio("금 포함", {"US_STOCK": 60, "US_LTB": 30, "GOLD": 10}))
     res = bt.run_backtest(ports, date(1996, 11, 6), date(2026, 11, 5), 10_000_000, 0, "yearly", "USD", hist)
-    assert all(x.sim.index[0] >= pd.Timestamp("2000-08-30") for x in res.results)
-    assert "2000-08-30" in res.notes[0]
+    assert all(x.sim.index[0] == pd.Timestamp("1996-11-06") for x in res.results)
+    assert not any("부터 있어서" in n for n in res.notes)
+
+
+def test_gold_monthly_history_from_file():
+    g = bt.gold_monthly_history()
+    assert g.index[0] == pd.Timestamp("1968-01-01") and g.index[-1] == pd.Timestamp("2000-12-29")
+    assert g.index.dayofweek.max() <= 4                        # 영업일만
+    assert g["1990-01-15"] == 410 and g["1990-01-31"] == 410  # 한 달 동안 같은 값 (계단)
+    assert g["1980-01-15"] == 675                              # 1980년 1월 급등
+    assert bt.GOLD_WB not in bt.needed_tickers({"GOLD"})       # 야후로 받지 않는다
+
+
+def test_gold_backtest_from_1990_splices_world_bank_data():
+    hist = fakes.fake_history(bt.needed_tickers({"GOLD", "US_STOCK"}))
+    s, segs = bt.splice(bt.chain_of("GOLD"), hist)
+    assert [x["ticker"] for x in segs] == [bt.GOLD_WB, "GC=F", "GLD"]
+    assert s.index[0] == pd.Timestamp("1968-01-01")
+    first = hist["GC=F"].index[0]
+    # 이어 붙인 날 값이 맞고(점프 없음), 그 전 구간은 세계은행 가격의 변화율을 그대로 따른다
+    before = s[s.index < first]
+    wb = bt.gold_monthly_history()
+    assert before.iloc[-1] / before["1990-01-02"] == pytest.approx(wb[before.index[-1]] / wb["1990-01-02"])
+    assert before.iloc[-1] == pytest.approx(s[first] * wb[before.index[-1]] / wb[wb.index <= first].iloc[-1])
+    ports = [bt.Portfolio("금 100", {"GOLD": 100}), bt.Portfolio("주식 90 금 10", {"US_STOCK": 90, "GOLD": 10})]
+    res = bt.run_backtest(ports, date(1990, 1, 1), date(2026, 11, 5), 1_000_000, 0, "none", "KRW", hist)
+    assert all(r.sim.index[0] == pd.Timestamp("1990-01-01") for r in res.results)
+    assert bt.GOLD_WB in set(res.sources["티커"])
+    assert any("세계은행" in n for n in res.notes)
 
 
 def test_weights_from_my_targets():
@@ -119,6 +146,17 @@ def test_backtest_page_runs_and_saves_preset():
     assert not at.exception
     assert fakes.TABLES["backtest_presets"][0]["name"] == "주식 60 / 장기채 30 / 금 10"
     assert fakes.TABLES["backtest_presets"][0]["allocations"]["GOLD"] == 10
+
+
+def test_backtest_page_from_1990_with_gold():
+    at = run("backtest")
+    at.date_input(key="bt_start").set_value(date(1990, 1, 1)).run()
+    [b for b in at.button if b.label == "백테스트 실행"][0].click().run()
+    assert not at.exception
+    r = at.session_state.bt_run
+    # 기본 조합의 원자재(DBC) 때문에 늦어지더라도, 늦어진 이유에 금은 없다
+    assert not any(n.startswith("금") or ", 금" in n for n in r.notes if "부터 있어서" in n)
+    assert bt.GOLD_WB in set(r.sources["티커"])
 
 
 def test_backtest_page_uses_my_targets():

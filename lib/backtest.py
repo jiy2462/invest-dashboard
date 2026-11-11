@@ -2,12 +2,14 @@
 
 자산군마다 '대표 ETF → 그 이전을 대신하는 펀드·지수' 순서의 티커 목록을 두고,
 앞 티커가 없는 기간은 다음 티커의 일별 수익률로 채운다(어느 구간에 무엇을 썼는지 기록).
-계산 함수는 네트워크 없이 pandas만으로 동작한다(테스트 용이). 시세는 yfinance로만 받는다.
+계산 함수는 네트워크 없이 pandas만으로 동작한다(테스트 용이). 시세는 yfinance로 받고,
+야후에 없는 오래된 금 시세는 저장소에 넣어 둔 세계은행 월평균 가격(data/gold_usd_monthly.csv)을 쓴다.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -17,10 +19,13 @@ import yfinance as yf
 
 from lib.db import get_client
 
-MAX_YEARS = 30
+MAX_YEARS = 30         # 처음 열었을 때 기본 시작일 (30년 전)
+EARLIEST = date(1970, 1, 1)   # 고를 수 있는 가장 이른 시작일. 데이터가 없는 자산은 있는 날부터 비교한다
 CUSTOM = "T:"          # 직접 입력한 티커는 'T:AAPL'처럼 저장한다
 FX = "KRW=X"           # 원/달러 (야후는 2003년 말부터)
 RF = "^IRX"            # 미국 3개월 국채 금리(연 %): 샤프 지수의 무위험 수익률
+GOLD_WB = "WB:GOLD"    # 세계은행 금 월평균 가격(1968~2000). 야후가 아니라 저장소 파일에서 읽는다
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 REBALANCE = {"none": "안 함", "quarterly": "분기마다", "semiannual": "6개월마다", "yearly": "1년마다"}
 
 
@@ -45,7 +50,8 @@ CATALOG: dict[str, AssetClass] = {
     "US_STB": AssetClass("미국 초단기 국채·현금", "USD", ("BIL", RF)),
     "US_AGG": AssetClass("미국 종합 채권", "USD", ("AGG", "VBMFX")),
     "US_TIPS": AssetClass("미국 물가연동채", "USD", ("TIP", "VIPSX")),
-    "GOLD": AssetClass("금", "USD", ("GLD", "GC=F"), "야후에 2000년 이전 금 시세가 없어 2000년 8월부터"),
+    "GOLD": AssetClass("금", "USD", ("GLD", "GC=F", GOLD_WB),
+                       "2000년 8월 이전은 세계은행 금 월평균 가격(1968년~)으로 채워서, 그 기간은 한 달에 한 번만 값이 바뀌어요"),
     "COMMODITY": AssetClass("원자재", "USD", ("DBC", "^SPGSCI")),
     "REIT": AssetClass("미국 리츠", "USD", ("VNQ", "VGSIX")),
     "BTC": AssetClass("비트코인", "USD", ("BTC-USD",), "야후 데이터는 2014년 9월부터"),
@@ -65,6 +71,7 @@ TICKER_NOTES = {
     "VBMFX": "뱅가드 종합 채권 펀드",
     "VIPSX": "뱅가드 물가연동채 펀드",
     "GC=F": "금 선물 (근월물)",
+    GOLD_WB: "세계은행 금 월평균 가격 (런던 시세, 월별)",
     "^SPGSCI": "S&P GSCI 원자재 지수",
     "VGSIX": "뱅가드 리츠 펀드",
 }
@@ -123,6 +130,7 @@ def custom_key(ticker: str) -> str:
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def fetch_history(tickers: tuple[str, ...]) -> dict[str, pd.Series]:
     """티커별 전체 기간 일별 종가(배당·분할 반영). {티커: Series}. 실패한 티커는 빠진다."""
+    tickers = tuple(t for t in tickers if t not in LOCAL_SOURCES)
     if not tickers:
         return {}
     raw = yf.download(list(tickers), period="max", interval="1d", auto_adjust=True,
@@ -141,6 +149,25 @@ def fetch_history(tickers: tuple[str, ...]) -> dict[str, pd.Series]:
             s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
             out[t] = s.astype(float)
     return out
+
+
+def gold_monthly_history() -> pd.Series:
+    """세계은행(Pink Sheet) 금 월평균 가격(USD/온스, 1968-01~2000-12)을 영업일 시계열로 바꾼다.
+
+    한 달 동안은 그달 평균값을 그대로 두고 다음 달 첫 영업일에 바뀐다(계단 모양).
+    부드럽게 이어 그리면 하루 변동이 실제보다 훨씬 작게 잡히므로 계단으로 둔다.
+    출처: World Bank Commodity Markets, datahub.io/core/gold-prices (PDDL, 퍼블릭 도메인).
+    """
+    try:
+        df = pd.read_csv(DATA_DIR / "gold_usd_monthly.csv")
+    except OSError:
+        return pd.Series(dtype=float)
+    m = pd.Series(df["usd"].astype(float).to_numpy(), index=pd.to_datetime(df["month"], format="%Y-%m"))
+    days = pd.bdate_range(m.index[0], m.index[-1] + pd.offsets.MonthEnd(0))
+    return m.reindex(m.index.union(days)).ffill().reindex(days)
+
+
+LOCAL_SOURCES = {GOLD_WB: gold_monthly_history}   # 네트워크 없이 파일에서 읽는 '티커'
 
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
@@ -174,6 +201,8 @@ def splice(chain: tuple[str, ...], hist: dict[str, pd.Series]) -> tuple[pd.Serie
     segments: list[dict] = []
     for t in chain:
         s = hist.get(t)
+        if s is None and t in LOCAL_SOURCES:
+            s = LOCAL_SOURCES[t]()
         if s is None or len(s) < 2:
             continue
         s = rate_to_index(s) if t == RF else s.sort_index()
@@ -374,7 +403,7 @@ def needed_tickers(keys: set[str]) -> tuple[str, ...]:
     ts = {FX, RF}
     for k in keys:
         ts.update(chain_of(k))
-    return tuple(sorted(ts))
+    return tuple(sorted(ts - set(LOCAL_SOURCES)))
 
 
 def run_backtest(portfolios: list[Portfolio], start: date, end: date, initial: float, monthly: float,
@@ -404,6 +433,9 @@ def run_backtest(portfolios: list[Portfolio], start: date, end: date, initial: f
         if k in CATALOG and CATALOG[k].note:
             notes.append(f"{CATALOG[k].label}: {CATALOG[k].note}")
     sources = pd.DataFrame(rows, columns=["자산", "티커", "설명", "시작", "끝"])
+    if any(currency_of(k) != base for k in series) and fetch_fred_krw().empty:
+        notes.append("미국 연준(FRED) 환율을 받지 못해 원/달러 환율은 야후(2003년 12월~) 것만 썼어요. "
+                     "더 이전부터 보려면 계산 통화를 달러로 바꿔 보세요.")
 
     want_start, want_end = pd.Timestamp(start), pd.Timestamp(end)
     results: list[Result] = []
