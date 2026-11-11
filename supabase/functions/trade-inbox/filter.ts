@@ -7,7 +7,8 @@
 // 결과는 세 가지다.
 //   "keep"   : 체결·배당 알림 → 대기함(pending)
 //   "hold"   : 그 증권사 알림이지만 체결·배당 말을 못 찾음 → 저장은 하되 '무시함'으로 (되돌릴 수 있게)
-//   "drop"   : 그 증권사 이름이 아예 없음(다른 카톡 채널) → 저장하지 않음
+//   "drop"   : (지금은 쓰지 않음) 2026-11-11 메리츠 QQQM 체결 알림이 '회사 이름 없음'으로 버려진 뒤로,
+//              아이폰 단축어의 조건문이 이미 회사별로 거르므로 서버는 버리지 않고 모두 남긴다.
 
 // 회사별 이름
 const BROKERS: Record<string, RegExp> = {
@@ -24,7 +25,8 @@ export type Verdict = { action: "keep" | "hold" | "drop"; reason?: string };
 export function judge(source: string, title: string, body: string): Verdict {
   const text = [title, body].filter(Boolean).join("\n");
   const broker = BROKERS[source];
-  if (broker && !broker.test(text)) return { action: "drop", reason: `${source} 알림이 아님` };
-  if (!TRADE_WORDS.test(text)) return { action: "hold", reason: "체결·배당 말을 못 찾음" };
-  return { action: "keep" };
+  // 체결·배당 말이 있으면, 증권사 이름이 글에 없더라도 그 회사 자동화가 보낸 것이니 대기함에 올린다.
+  if (TRADE_WORDS.test(text)) return { action: "keep" };
+  if (broker && !broker.test(text)) return { action: "hold", reason: "증권사 이름·체결 말을 못 찾음" };
+  return { action: "hold", reason: "체결·배당 말을 못 찾음" };
 }

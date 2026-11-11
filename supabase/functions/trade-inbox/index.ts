@@ -76,7 +76,10 @@ Deno.serve(async (req: Request) => {
   // 다른 카톡 채널(광고·결제 등)은 저장하지 않고, 증권사 알림인데 체결·배당 말을 못 찾으면
   // '무시함'으로 저장해 둔다(놓친 체결을 '처리한 알림'에서 되돌릴 수 있게).
   const verdict = judge(source, title, body);
-  console.log(JSON.stringify({ source, action: verdict.action, reason: verdict.reason ?? null }));
+  console.log(JSON.stringify({
+    source, action: verdict.action, reason: verdict.reason ?? null,
+    keys: Object.keys(data), length: (title + body).length, preview: (title + " | " + body).slice(0, 80),
+  }));
   if (verdict.action === "drop") return reply(200, { ok: true, skipped: true, reason: verdict.reason });
   const held = verdict.action === "hold";
   if (held) raw.skip_reason = verdict.reason;
