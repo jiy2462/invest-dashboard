@@ -3,10 +3,12 @@
 알림 원문은 Supabase Edge Function `card-inbox`가 아이폰 단축어(iOS 27 알림 자동화)에서 받아 쌓는다.
 일시·거래처·금액은 여기의 읽기 규칙(parse)이 채운다. 규칙을 고치면 PARSER_VERSION을 올린다:
 사람이 고치지 않았고 확인 완료도 안 한 줄은 화면을 열 때 새 규칙으로 다시 읽는다.
+금액은 부호를 붙여 저장한다: 결제는 양수, 취소(매출취소·승인취소·환불)는 음수. 그래서 금액을 더하면 순지출이 된다.
 """
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
@@ -14,7 +16,7 @@ import pandas as pd
 from lib.db import get_client
 
 KST = timezone(timedelta(hours=9))
-PARSER_VERSION = 1
+PARSER_VERSION = 2          # 2: 매출취소 알림 거래처(발신번호 줄 빼기)·취소 금액 음수
 CARDS = {"shinhan": "신한카드", "hyundai": "현대카드", "other": "기타"}
 KINDS = {"pay": "결제", "cancel": "취소"}
 COLUMNS = ["id", "received_at", "card", "title", "body", "kind", "spent_at", "merchant", "amount", "currency",
@@ -32,9 +34,11 @@ _NOT_TXN = re.compile(r"결제\s*예정|청구\s*(금액|서)|명세서|납부|�
 _NOISE = [
     r"\[?(신한|현대)\s*카드\]?(\s*[A-Za-z0-9]{1,8})?(\s*\(\s*[\d*]{3,4}\s*\))?",
     r"\(\s*[\d*]{3,4}\s*\)", r"SOL\s*페이|신한\s*SOL|현대카드\s*앱",
-    r"(해외|체크|신용)?\s*(승인\s*취소|승인|취소|결제\s*완료|결제|사용|이용|환불)(\s*(되었습니다|됐어요|완료|알림|안내|내역))?",
+    r"(해외|체크|신용|매출)?\s*(승인\s*취소|매출\s*취소|승인|취소|결제\s*완료|결제|사용|이용|환불)(\s*(되었습니다|됐어요|완료|알림|안내|내역))?",
     r"[가-힣A-Za-z][*＊]+[가-힣A-Za-z]*\s*님?", r"[가-힣]{2,4}\s*님",
     r"(누적|잔액|한도|포인트|적립)[^\n]*",
+    # 카드사 전화번호 줄: [발신번호 1544-7000], [신한카드 1544-7000], 고객센터 1577-6000 …
+    r"\[?\s*(발신\s*번호|고객\s*센터|문의)?\s*[:：]?\s*\d{2,4}-\d{3,4}(-\d{4})?\s*\]?",
     rf"{_CCY}\s*{_NUM}", rf"{_NUM}\s*(원|USD|달러|엔|유로|위안)",
     r"일시불|\d{1,2}\s*개월|할부|무이자",
     r"\d{1,2}\s*[/월.]\s*\d{1,2}\s*일?", r"\d{1,2}\s*:\s*\d{2}(\s*:\s*\d{2})?", r"\d{1,2}\s*시\s*\d{1,2}\s*분",
@@ -129,7 +133,8 @@ def _merchant(text: str, when: re.Match | None) -> str | None:
 
 def parse(title: str | None, body: str | None, received: datetime) -> dict:
     """알림 한 건에서 결제 정보를 읽는다. 결제·취소 알림이 아니면 kind가 None."""
-    text = "\n".join(x for x in (title or "", body or "") if x).replace("\r", "")
+    # 아이폰 단축어가 한글을 자모로 쪼개 보내는 일이 있어(NFD) 먼저 붙여 쓴 꼴(NFC)로 맞춘다.
+    text = unicodedata.normalize("NFC", "\n".join(x for x in (title or "", body or "") if x).replace("\r", ""))
     amount, ccy = _amount(text)
     cancel = bool(re.search(r"취소|환불", text))
     kind = None
@@ -144,7 +149,14 @@ def parse(title: str | None, body: str | None, received: datetime) -> dict:
     if m:
         inst = "일시불" if m.group(0) == "일시불" else f"{int(m.group(1))}개월"
     return {"kind": kind, "spent_at": when, "merchant": _merchant(text, wm) if kind else None,
-            "amount": amount if kind else None, "currency": ccy, "installment": inst}
+            "amount": signed(amount, kind) if kind else None, "currency": ccy, "installment": inst}
+
+
+def signed(amount, kind: str | None):
+    """저장·표시용 부호: 취소는 음수, 결제는 양수."""
+    if amount is None or pd.isna(amount):
+        return amount
+    return -abs(float(amount)) if kind == "cancel" else abs(float(amount))
 
 
 # ── 저장 ────────────────────────────────────────────────────
@@ -179,6 +191,11 @@ def load() -> pd.DataFrame:
             got["parse_version"] = PARSER_VERSION
             _row_update(int(r["id"]), got)
             r.update({k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in got.items()})
+        elif r.get("amount") is not None and r.get("kind") in KINDS:
+            want = signed(float(r["amount"]), r["kind"])           # 예전(양수로 저장한) 취소 금액 부호 맞추기
+            if want != float(r["amount"]):
+                _row_update(int(r["id"]), {"amount": want})
+                r["amount"] = want
     df = pd.DataFrame(rows, columns=COLUMNS)
     if df.empty:
         return df
@@ -210,13 +227,18 @@ def delete(row_id: int) -> None:
 def add_manual(spent_at: datetime, card: str, kind: str, merchant: str, amount: float, memo: str = "") -> None:
     """알림이 안 온 결제를 손으로 넣는다."""
     _table().insert({"card": card, "title": "직접 입력", "body": f"{merchant} {amount:,.0f}원",
-                     "kind": kind, "spent_at": spent_at.isoformat(), "merchant": merchant, "amount": amount,
+                     "kind": kind, "spent_at": spent_at.isoformat(), "merchant": merchant,
+                     "amount": signed(amount, kind),
                      "currency": "KRW", "parse_version": PARSER_VERSION, "edited": True,
                      "memo": memo or None}).execute()
 
 
-def apply_edits(edited_rows: dict, ids: list[int]) -> int:
-    """st.data_editor의 edited_rows({행 번호: {열: 값}})를 DB에 반영한다. 반영한 줄 수."""
+def apply_edits(edited_rows: dict, ids: list[int], kinds: list | None = None, amounts: list | None = None) -> int:
+    """st.data_editor의 edited_rows({행 번호: {열: 값}})를 DB에 반영한다. 반영한 줄 수.
+
+    kinds·amounts는 표에 보이는 순서의 지금 구분·금액. 금액 부호는 구분을 따른다(취소는 음수):
+    취소 줄에 11920을 넣어도 -11920으로, 구분을 결제↔취소로 바꾸면 금액 부호도 함께 바뀐다.
+    """
     col = {"확인": "checked", "일시": "spent_at", "구분": "kind", "거래처": "merchant", "금액": "amount", "메모": "memo"}
     inv_kind = {v: k for k, v in KINDS.items()}
     n = 0
@@ -239,12 +261,18 @@ def apply_edits(edited_rows: dict, ids: list[int]) -> int:
                     continue
                 v = (ts.tz_localize(KST) if ts.tzinfo is None else ts).to_pydatetime()
             elif key == "amount":
-                v = None if v is None or pd.isna(v) else abs(float(v))
+                v = None if v is None or pd.isna(v) else float(v)
             elif key in ("merchant", "memo"):
                 v = (v or "").strip() or None
             elif key == "checked":
                 v = bool(v)
             payload[key] = v
+        kind = payload.get("kind") or (kinds[pos] if kinds and pos < len(kinds) else None)
+        if payload.get("amount") is not None:
+            payload["amount"] = signed(payload["amount"], kind)
+        elif "kind" in payload and amounts and pos < len(amounts) and amounts[pos] is not None \
+                and not pd.isna(amounts[pos]):
+            payload["amount"] = signed(amounts[pos], kind)
         if payload:
             update(int(ids[pos]), payload)
             n += 1
@@ -252,11 +280,11 @@ def apply_edits(edited_rows: dict, ids: list[int]) -> int:
 
 
 def month_summary(df: pd.DataFrame) -> dict:
-    """원화 결제 합계·취소 합계·순지출·확인 안 한 건수."""
+    """원화 결제 합계(양수)·취소 합계(음수)·순지출(둘을 더한 값)·확인 안 한 건수."""
     if df.empty:
         return {"pay": 0.0, "cancel": 0.0, "net": 0.0, "unchecked": 0, "count": 0}
     krw = df[df["currency"].fillna("KRW") == "KRW"]
-    pay = float(krw.loc[krw["kind"] == "pay", "amount"].sum())
-    cancel = float(krw.loc[krw["kind"] == "cancel", "amount"].sum())
-    return {"pay": pay, "cancel": cancel, "net": pay - cancel, "unchecked": int((~df["checked"]).sum()),
+    pay = float(krw.loc[krw["kind"] == "pay", "amount"].abs().sum())
+    cancel = -float(krw.loc[krw["kind"] == "cancel", "amount"].abs().sum())
+    return {"pay": pay, "cancel": cancel, "net": pay + cancel, "unchecked": int((~df["checked"]).sum()),
             "count": len(df)}
