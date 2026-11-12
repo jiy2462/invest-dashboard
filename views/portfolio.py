@@ -10,6 +10,7 @@ from lib import plan as pl
 from lib import portfolio as pf
 from lib import ui
 from lib import symbols
+from lib import trade_calendar as tcal
 from lib import trade_inbox as ib
 from lib import valuation
 
@@ -609,6 +610,34 @@ with tab_alloc:
                              width="stretch", column_config={c: NUM for c in snaps["month"].dt.strftime("%Y-%m")})
 
 # ── 거래 입력·내역 ─────────────────────────────────────────
+@st.fragment
+def trade_calendar(src: pd.DataFrame) -> None:
+    """거래 내역 월간 캘린더. 넘기기 버튼은 이 부분만 다시 그린다."""
+    this = (today.year, today.month)
+    first = pd.to_datetime(src["trade_date"]).min()
+    oldest = min((first.year, first.month), this) if pd.notna(first) else this
+    ym = min(max(st.session_state.get("txcal-ym", this), oldest), this)
+
+    def go(target: tuple[int, int]) -> None:
+        st.session_state["txcal-ym"] = target
+
+    with st.container(horizontal=True, gap="small", vertical_alignment="center"):
+        st.button("‹ 이전 달", key="txcal-prev", disabled=ym <= oldest,
+                  on_click=go, args=(tcal.shift_month(ym, -1),))
+        st.button("다음 달 ›", key="txcal-next", disabled=ym >= this,
+                  on_click=go, args=(tcal.shift_month(ym, 1),))
+        st.button("이번 달", key="txcal-now", disabled=ym == this, on_click=go, args=(this,))
+    items = tcal.month_items(src, ym[0], ym[1], name_of)
+    summary = tcal.month_summary(items, src, ym[0], ym[1])
+    with ui.card("tx-cal"):
+        st.markdown(f"#### {ym[0]}년 {ym[1]}월")
+        st.caption(summary or "이 달에는 거래가 없어요.")
+        st.html(tcal.calendar_html(ym[0], ym[1], items, today))
+        if items:
+            with st.expander("이 달 거래 목록 (이름 전체 보기)"):
+                st.dataframe(tcal.month_list(items, ym[0], ym[1]), hide_index=True, width="stretch")
+
+
 with tab_tx:
     st.subheader("매도·배당 입력")
     st.caption("매수는 ‘매수 입력’ 탭이 더 간단해요. 여기서는 매도·배당과 수수료까지 자세히 넣을 수 있어요.")
@@ -695,6 +724,11 @@ with tab_tx:
             if st.button("삭제", key="tx-del-btn"):
                 pf.delete_transaction(int(del_id))
                 st.rerun()
+
+        st.subheader("거래 캘린더")
+        st.caption("매수는 빨강(주식수), 매도는 파랑(주식수), 배당은 노랑(받은 금액)이에요. "
+                   "위의 계좌·종목 필터가 그대로 적용돼요.")
+        trade_calendar(tx[tx["symbol"].isin(fs)] if fs else tx)
 
 # ── 알림 대기함 ───────────────────────────────────────────
 INBOX_SHOW = 10
