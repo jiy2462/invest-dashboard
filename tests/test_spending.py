@@ -14,7 +14,13 @@ GOT = datetime(2026, 11, 7, 14, 25, tzinfo=sp.KST)
     (None, "신한카드(1234)승인 홍*동 12,500원(일시불)11/07 14:23 스타벅스 누적1,234,567원",
      "pay", (11, 7, 14, 23), "스타벅스", 12500, "KRW", "일시불"),
     (None, "신한카드(1234)승인취소 홍*동 12,500원(일시불)11/07 14:23 스타벅스",
-     "cancel", (11, 7, 14, 23), "스타벅스", 12500, "KRW", "일시불"),
+     "cancel", (11, 7, 14, 23), "스타벅스", -12500, "KRW", "일시불"),
+    # 실제 신한카드 매출취소 푸시: 시각 없이 날짜만 있고 끝에 발신번호 줄이 붙는다 → 받은 때, 거래처는 날짜 뒤
+    (None, "신한카드 (3123)  매출취소  장*영       11,920원  11/09 에이치앤앰헤네스앤모리\n\n[발신번호 1544-7000]",
+     "cancel", (11, 7, 14, 25), "에이치앤앰헤네스앤모리", -11920, "KRW", None),
+    # 실제 신한카드 승인 푸시
+    (None, "[신한카드(059) 승인] 장*영\n- 승인금액: 11,160원(일시불)\n- 승인일시: 11/08 09:45\n- 가맹점명: 쿠팡\n"
+     "- 누적금액: 2,888,653원\n\n[신한카드 1544-7000]", "pay", (11, 8, 9, 45), "쿠팡", 11160, "KRW", "일시불"),
     ("현대카드", "현대카드 M 승인\n홍*동\n45,000원 일시불\n11/07 13:10\n쿠팡(쿠페이)\n누적 523,000원",
      "pay", (11, 7, 13, 10), "쿠팡(쿠페이)", 45000, "KRW", "일시불"),
     ("신한 SOL페이", "[신한카드] 김*영님 3,200원 결제 | GS25 역삼점 | 11.07 14:20",
@@ -40,13 +46,21 @@ def test_parse_not_a_payment(body):
     assert sp.parse("현대카드", body, GOT)["kind"] is None
 
 
+def test_parse_decomposed_hangul():
+    """단축어가 한글을 자모로 쪼개 보내도(NFD) 같은 결과."""
+    import unicodedata
+    body = unicodedata.normalize("NFD", "신한카드 (3123)  매출취소  장*영  11,920원  11/09 에이치앤앰헤네스앤모리\n\n[발신번호 1544-7000]")
+    g = sp.parse(None, body, GOT)
+    assert (g["kind"], g["merchant"], g["amount"]) == ("cancel", "에이치앤앰헤네스앤모리", -11920)
+
+
 def test_parse_december_alert_read_in_january():
     g = sp.parse(None, "신한카드 승인 3,000원 12/31 23:50 편의점", datetime(2027, 1, 1, 0, 5, tzinfo=sp.KST))
     assert g["spent_at"].year == 2026 and g["spent_at"].month == 12
 
 
 def _alert(i, card, body, **kw):
-    return {"id": i, "received_at": "2026-11-07T05:30:00+00:00", "card": card, "title": None, "body": body,
+    return {"id": i, "received_at": datetime.now(sp.KST).isoformat(), "card": card, "title": None, "body": body,
             "raw": None, "kind": None, "spent_at": None, "merchant": None, "amount": None, "currency": "KRW",
             "installment": None, "parse_version": 0, "edited": False, "memo": None, "checked": False,
             "checked_at": None, **kw}
@@ -61,26 +75,33 @@ def test_spending_page_parses_and_checks():
         _alert(3, "hyundai", "11월 결제예정금액은 1,234,000원입니다."),
         _alert(4, "shinhan", "이미 고친 줄", kind="pay", merchant="고친 가게", amount=1000, edited=True,
                spent_at=now.isoformat(), parse_version=0),
+        # 예전 규칙으로 양수로 저장된 취소 줄(사람이 고친 줄이라 다시 읽지 않음) → 부호만 음수로
+        _alert(5, "shinhan", "옛 취소", kind="cancel", merchant="옛 가게", amount=500, edited=True,
+               spent_at=now.isoformat(), parse_version=1),
     ]
     at = run("spending")
     assert not at.exception
     rows = {r["id"]: r for r in fakes.TABLES["card_expenses"]}
     assert (rows[1]["kind"], rows[1]["merchant"], rows[1]["amount"], rows[1]["parse_version"]) == \
         ("pay", "스타벅스", 12500, sp.PARSER_VERSION)
-    assert (rows[2]["kind"], rows[2]["amount"]) == ("cancel", 2500)
+    assert (rows[2]["kind"], rows[2]["amount"]) == ("cancel", -2500)
+    assert (rows[5]["amount"], rows[5]["merchant"]) == (-500, "옛 가게")
     assert rows[3]["kind"] is None
     assert rows[4]["merchant"] == "고친 가게" and rows[4]["parse_version"] == 0     # 사람이 고친 줄은 그대로
     md = " ".join(m.value for m in at.markdown)
-    assert "13,500원" in md and "2,500원" in md and "11,000원" in md       # 결제·취소·순지출
+    assert "13,500원" in md and "-3,000원" in md and "10,500원" in md     # 결제·취소(음수)·순지출
     assert any("결제 알림이 아닌 것 1건" in e.label for e in at.expander)
 
     # 표에서 확인 칸을 누른 것과 같은 변경을 저장
-    ids = [1, 2]                                                          # 표에 보이는 순서의 id
-    n = sp.apply_edits({0: {"확인": True}, 1: {"거래처": " 스벅 ", "금액": -2000}}, ids)
+    ids, kinds, amounts = [1, 2], ["pay", "cancel"], [12500, -2500]      # 표에 보이는 순서
+    n = sp.apply_edits({0: {"확인": True}, 1: {"거래처": " 스벅 ", "금액": 2000}}, ids, kinds, amounts)
     assert n == 2
     rows = {r["id"]: r for r in fakes.TABLES["card_expenses"]}
     assert rows[ids[0]]["checked"] and rows[ids[0]]["checked_at"] and not rows[ids[0]]["edited"]
-    assert (rows[ids[1]]["merchant"], rows[ids[1]]["amount"], rows[ids[1]]["edited"]) == ("스벅", 2000, True)
+    assert (rows[ids[1]]["merchant"], rows[ids[1]]["amount"], rows[ids[1]]["edited"]) == ("스벅", -2000, True)
+    # 구분을 결제→취소로 바꾸면 금액도 음수로
+    sp.apply_edits({0: {"구분": "취소"}}, ids, kinds, amounts)
+    assert {r["id"]: r for r in fakes.TABLES["card_expenses"]}[1]["amount"] == -12500
 
 
 def test_spending_manual_add_and_empty():

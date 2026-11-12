@@ -56,7 +56,7 @@ with ui.card("sp-summary"):
     k1, k2, k3, k4 = st.columns(4)
     k1.markdown(ui.stat("결제", f"{s['pay']:,.0f}원", f"{int((view['kind'] == 'pay').sum()) if not view.empty else 0}건"),
                 unsafe_allow_html=True)
-    k2.markdown(ui.stat("취소", f"{s['cancel']:,.0f}원", f"{int((view['kind'] == 'cancel').sum()) if not view.empty else 0}건",
+    k2.markdown(ui.stat("취소", f"{s['cancel']:,.0f}원" if s["cancel"] else "0원", f"{int((view['kind'] == 'cancel').sum()) if not view.empty else 0}건",
                     color=ui.BLUE), unsafe_allow_html=True)
     k3.markdown(ui.stat("순지출", f"{s['net']:,.0f}원"), unsafe_allow_html=True)
     k4.markdown(ui.stat("확인 전", f"{s['unchecked']}건", "모두 확인했어요" if s["count"] and not s["unchecked"] else "",
@@ -74,9 +74,9 @@ if not view.empty and status != "전체":
 ver = st.session_state.setdefault("sp-ver", 0)
 
 
-def _save(ids: list[int], v: int) -> None:
+def _save(ids: list[int], kinds: list, amounts: list, v: int) -> None:
     state = st.session_state.get(f"sp-editor-{v}") or {}
-    n = sp.apply_edits(state.get("edited_rows") or {}, ids)
+    n = sp.apply_edits(state.get("edited_rows") or {}, ids, kinds, amounts)
     st.session_state["sp-ver"] = v + 1           # 표를 새로 그려 줄 번호가 어긋나지 않게
     if n:
         st.toast(f"{n}건 저장했어요.")
@@ -101,8 +101,9 @@ else:
     if not show_ccy:
         table = table.drop(columns="통화")
     ids = [int(i) for i in view["id"]]
+    kinds, amounts = list(view["kind"]), [None if pd.isna(a) else float(a) for a in view["amount"]]
     st.data_editor(
-        table, hide_index=True, width="stretch", key=f"sp-editor-{ver}", on_change=_save, args=(ids, ver),
+        table, hide_index=True, width="stretch", key=f"sp-editor-{ver}", on_change=_save, args=(ids, kinds, amounts, ver),
         disabled=["카드", "통화", "할부"],
         column_config={
             "확인": st.column_config.CheckboxColumn("확인", width="small", help="확인 완료한 내역에 체크"),
@@ -111,12 +112,14 @@ else:
             "구분": st.column_config.SelectboxColumn("구분", options=list(sp.KINDS.values()), width="small",
                                                    required=True),
             "거래처": st.column_config.TextColumn("거래처", width="medium"),
-            "금액": st.column_config.NumberColumn("금액", format="localized", min_value=0, width="small"),
+            "금액": st.column_config.NumberColumn("금액", format="localized", width="small",
+                                                 help="취소는 음수(-)로 보여요. 취소 줄에는 숫자만 넣어도 -로 저장돼요."),
             "할부": st.column_config.TextColumn("할부", width="small"),
             "메모": st.column_config.TextColumn("메모", width="medium"),
         },
     )
-    st.caption("확인 칸을 누르면 바로 저장돼요. 거래처·금액·일시를 고치면 그 값이 그대로 남아요.")
+    st.caption("확인 칸을 누르면 바로 저장돼요. 거래처·금액·일시를 고치면 그 값이 그대로 남아요. "
+               "취소 금액은 음수(-)로 보여요.")
 
 # ── 아래: 직접 추가 · 원문 · 결제 알림이 아닌 것 ─────────────
 with st.expander("직접 추가 (알림이 안 온 결제)"):
