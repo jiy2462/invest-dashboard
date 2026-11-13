@@ -101,6 +101,91 @@ SYMBOL_TO_CLASS = {
     "DBC": "COMMODITY", "VNQ": "REIT", "BTC-USD": "BTC", "BTC-KRW": "BTC",
 }
 
+# ── 비용: 매매 수수료·ETF 연보수 ─────────────────────────────
+# 야후의 ETF·펀드 가격(배당 반영 종가)은 운용보수가 이미 매일 빠진 값이다. 그래서 '내가 실제로 살 ETF'의 연보수를
+# 그대로 또 빼면 두 번 빠진다. 구간마다 (내 ETF 연보수 − 그 구간 데이터에 이미 들어 있는 보수)만큼만 조정한다.
+#   예) 금: GLD 구간은 GLD 보수 0.40%가 이미 빠져 있으니 GLDM(0.10%)으로 사면 +0.30%/년 되돌려 주고,
+#       세계은행·선물 구간(보수 없음)은 0.10%/년을 뺀다.
+# 아래 값은 각 티커의 현재 총보수(%/년) 근사다. 지수·선물·금리·세계은행 가격은 0.
+EMBEDDED_ER: dict[str, float] = {
+    "SPY": 0.0945, "VFINX": 0.14, "VTI": 0.03, "VTSMX": 0.14, "QQQ": 0.20, "SCHD": 0.06,
+    "EFA": 0.32, "VGTSX": 0.17, "EEM": 0.70, "VEIEX": 0.29, "069500.KS": 0.15,
+    "TLT": 0.15, "VUSTX": 0.20, "IEF": 0.15, "VFITX": 0.20, "BIL": 0.1356, "AGG": 0.03, "VBMFX": 0.15,
+    "TIP": 0.18, "VIPSX": 0.20, "GLD": 0.40, "DBC": 0.85, "VNQ": 0.13, "VGSIX": 0.27,
+}
+
+# 백테스트 자산 → 내가 실제로 사는 방법 (증권사, 내 종목). 연보수는 포트폴리오 설정의 종목별 연보수를 쓴다.
+# 해외 ETF는 메리츠, 국내 ETF는 한국투자증권. 금은 지금 주로 사는 KRX 금현물(NH, 보수 없음).
+MY_VEHICLE: dict[str, tuple[str, str | None, str]] = {
+    "US_STOCK": ("메리츠증권", "SPYM", "SPYM"),
+    "NASDAQ100": ("메리츠증권", "QQQM", "QQQM"),
+    "US_STB": ("메리츠증권", "SGOV", "SGOV"),
+    "GOLD": ("NH투자증권", None, "KRX 금현물 (보수 없음)"),
+    "KOSPI": ("한국투자증권", None, "국내 ETF"),
+}
+CRYPTO_FEE = 0.05   # 업비트 원화 마켓 수수료 (비트코인 화면·돌파 전략과 같은 값)
+
+
+def default_costs(keys, rates: dict) -> dict[str, dict]:
+    """자산별 기본 비용 가정. {키: {"trade": 매매 수수료 %, "er": 연보수 %/년 또는 None(조정 안 함), "basis": 설명}}
+
+    rates는 lib.fees.merge() 모양({"brokers": {증권사: %}, "expense": {티커: %}}).
+    """
+    brokers, expense = rates.get("brokers", {}), rates.get("expense", {})
+    us, kr = brokers.get("메리츠증권", 0.0), brokers.get("한국투자증권", 0.0)
+    out: dict[str, dict] = {}
+    for k in keys:
+        if k in ("BTC",):
+            out[k] = {"trade": CRYPTO_FEE, "er": None, "basis": f"업비트 {CRYPTO_FEE:g}%"}
+            continue
+        if k in TREND_BASE:
+            out[k] = {"trade": 0.0, "er": None, "basis": f"전환할 때 {TREND_FEE:g}% (전략 안에서 계산)"}
+            continue
+        if k in MY_VEHICLE:
+            broker, sym, name = MY_VEHICLE[k]
+            er = expense.get(sym) if sym else None
+            if k == "GOLD":
+                er = 0.0
+            if er is None:   # 내 종목 연보수를 모르면 대표 ETF 보수 기준
+                er = EMBEDDED_ER.get(chain_of(k)[0])
+            out[k] = {"trade": brokers.get(broker, 0.0), "er": er,
+                      "basis": f"{name} · {broker.replace('증권', '')}"}
+            continue
+        first = chain_of(k)[0]
+        mine = expense.get(first.upper())
+        krw = currency_of(k) == "KRW"
+        if k in CATALOG:
+            er = mine if mine is not None else EMBEDDED_ER.get(first)
+            basis = f"{first} 보수 · {'한국투자' if krw else '메리츠'}"
+        else:   # 직접 입력 티커: 그 종목 가격에 보수가 이미 들어 있으니 내가 연보수를 적어 둔 종목만 조정 0
+            er = mine
+            basis = f"{first} · {'한국투자' if krw else '메리츠'}"
+        out[k] = {"trade": kr if krw else us, "er": er, "basis": basis}
+    return out
+
+
+def apply_expense(series: pd.Series, segments: list[dict], er: float | None) -> tuple[pd.Series, dict[str, float]]:
+    """이어 붙인 가격 지수에 구간별로 (er − 그 구간 티커에 이미 든 보수)%/년을 매일 나눠 반영한다.
+
+    돌려주는 값: (조정한 지수, {티커: 적용한 조정 %/년(−는 뺌)}). er이 None이면 그대로.
+    """
+    if er is None or series.empty or not segments:
+        return series, {}
+    adj = pd.Series(0.0, index=series.index)
+    applied: dict[str, float] = {}
+    bounds = [pd.Timestamp(seg["start"]) for seg in segments[1:]]
+    for i, seg in enumerate(segments):
+        a = er - EMBEDDED_ER.get(seg["ticker"], 0.0)
+        applied[seg["ticker"]] = -a
+        lo = pd.Timestamp(seg["start"]) if i else series.index[0]
+        hi = bounds[i] if i < len(bounds) else None
+        mask = (series.index > lo) & ((series.index <= hi) if hi is not None else True)
+        adj[mask] = a
+    days = series.index.to_series().diff().dt.days.fillna(0).to_numpy()
+    factor = np.cumprod((1 - adj.to_numpy() / 100) ** (days / 365.25))
+    return series * factor, applied
+
+
 PRESETS: dict[str, dict[str, float]] = {
     "주식 60 / 채권 40": {"US_STOCK": 60, "US_ITB": 40},
     "주식 60 / 장기채 30 / 금 10": {"US_STOCK": 60, "US_LTB": 30, "GOLD": 10},
@@ -305,39 +390,55 @@ def _period_key(ts: pd.Timestamp, kind: str):
 
 
 def simulate(prices: pd.DataFrame, weights: dict[str, float], initial: float, monthly: float,
-             rebalance: str) -> pd.DataFrame:
+             rebalance: str, fees: dict[str, float] | None = None) -> pd.DataFrame:
     """가격표(열=자산, 기준 통화)와 비중으로 매일 평가금액을 계산한다.
 
     - 첫날 초기 금액을 비중대로 산다.
     - 매달 첫 거래일에 월 적립금을 비중대로 산다.
     - 리밸런싱 주기의 첫 거래일에 전체를 목표 비중으로 맞춘다.
-    돌려주는 표: value(평가금액), invested(누적 투자금), nav(적립금 영향을 뺀 수익 지수, 1에서 시작).
+    - fees(자산별 매매 수수료 %)가 있으면 살 때·팔 때마다 거래금액 × 요율을 뗀다.
+      리밸런싱 수수료는 사고파는 금액 합에 매기고, 남은 돈을 목표 비중대로 나눈다.
+    돌려주는 표: value(평가금액), invested(누적 투자금), nav(적립금 영향을 뺀 수익 지수, 1에서 시작),
+    fees(누적 매매 수수료). 수수료는 nav에도 반영된다(낸 만큼 수익률이 낮아짐).
     """
     cols = [c for c in weights if c in prices.columns]
     w = np.array([weights[c] for c in cols], dtype=float)
     w = w / w.sum()
+    f = np.array([(fees or {}).get(c, 0.0) or 0.0 for c in cols], dtype=float) / 100
     p = prices[cols].to_numpy(dtype=float)
     idx = prices.index
-    units = initial * w / p[0]
+    units = initial * w * (1 - f) / p[0]
+    paid = float(initial * (w * f).sum())
     invested = initial
-    nav = 1.0
-    prev_val = initial
-    out_val, out_inv, out_nav = [initial], [initial], [1.0]
+    val0 = float(units @ p[0])
+    nav = val0 / initial if initial > 0 else 1.0
+    prev_val = val0
+    out_val, out_inv, out_nav, out_fee = [val0], [initial], [nav], [paid]
     for i in range(1, len(idx)):
         val = float(units @ p[i])
         nav *= val / prev_val if prev_val > 0 else 1.0
         new_month = _period_key(idx[i], "monthly") != _period_key(idx[i - 1], "monthly")
         if new_month and monthly > 0:
-            units = units + monthly * w / p[i]
+            cost = float(monthly * (w * f).sum())
+            units = units + monthly * w * (1 - f) / p[i]
             invested += monthly
-            val += monthly
+            if val + monthly > 0 and val > 0:
+                nav *= (val + monthly - cost) / (val + monthly)
+            val += monthly - cost
+            paid += cost
         if rebalance != "none" and _period_key(idx[i], rebalance) != _period_key(idx[i - 1], rebalance):
+            cost = float((np.abs(val * w - units * p[i]) * f).sum())
+            if val > 0:
+                nav *= (val - cost) / val
+            val -= cost
+            paid += cost
             units = val * w / p[i]
         prev_val = val
         out_val.append(val)
         out_inv.append(invested)
         out_nav.append(nav)
-    return pd.DataFrame({"value": out_val, "invested": out_inv, "nav": out_nav}, index=idx)
+        out_fee.append(paid)
+    return pd.DataFrame({"value": out_val, "invested": out_inv, "nav": out_nav, "fees": out_fee}, index=idx)
 
 
 def xirr(flows: list[tuple[pd.Timestamp, float]]) -> float | None:
@@ -386,6 +487,7 @@ def metrics(sim: pd.DataFrame, rf_daily: pd.Series | None = None) -> dict:
     return {
         "start": nav.index[0], "end": nav.index[-1], "years": years,
         "invested": float(sim["invested"].iloc[-1]), "final": float(sim["value"].iloc[-1]),
+        "fees_paid": float(sim["fees"].iloc[-1]) if "fees" in sim else 0.0,
         "cagr": float(cagr), "irr": xirr(flows), "vol": vol, "mdd": float(dd.min()),
         "mdd_date": dd.idxmin(), "sharpe": sharpe,
         "peak_recovery": peak_spell,       # 수익률 지수(nav)가 고점 아래 있던 가장 긴 기간
@@ -461,6 +563,9 @@ class Run:
     settings: dict = field(default_factory=dict)   # 화면에서 고른 옵션 (저장·불러오기용)
 
 
+SOURCE_COLS = ["자산", "티커", "설명", "시작", "끝"]
+
+
 def needed_tickers(keys: set[str]) -> tuple[str, ...]:
     ts = {FX, RF}
     for k in keys:
@@ -472,8 +577,10 @@ def needed_tickers(keys: set[str]) -> tuple[str, ...]:
 
 
 def run_backtest(portfolios: list[Portfolio], start: date, end: date, initial: float, monthly: float,
-                 rebalance: str, base: str, hist: dict[str, pd.Series]) -> Run:
+                 rebalance: str, base: str, hist: dict[str, pd.Series], costs: dict[str, dict] | None = None) -> Run:
+    """costs = {자산 키: {"trade": 매매 수수료 %, "er": 내 ETF 연보수 %/년 또는 None}}. None이면 비용 없이 계산."""
     keys = {k for p in portfolios for k, v in p.weights.items() if v > 0}
+    costs = costs or {}
     notes: list[str] = []
     hist, trend_pos = add_derived(hist, keys)
     fx = fx_series(hist)
@@ -484,6 +591,7 @@ def run_backtest(portfolios: list[Portfolio], start: date, end: date, initial: f
         if s.empty:
             notes.append(f"'{label_of(k)}' 시세를 받지 못해 뺐어요.")
             continue
+        s, er_adj = apply_expense(s, segs, (costs.get(k) or {}).get("er"))
         ccy = currency_of(k)
         if ccy != base:
             f = fx.reindex(s.index.union(fx.index)).ffill().reindex(s.index)
@@ -493,12 +601,14 @@ def run_backtest(portfolios: list[Portfolio], start: date, end: date, initial: f
                 continue
         series[k] = s
         for seg in segs:
+            adj = er_adj.get(seg["ticker"])
             rows.append({"자산": label_of(k), "티커": seg["ticker"],
                          "설명": TICKER_NOTES.get(seg["ticker"], "대표 ETF" if seg is segs[-1] else ""),
-                         "시작": seg["start"].date(), "끝": seg["end"].date()})
+                         "시작": seg["start"].date(), "끝": seg["end"].date(),
+                         "연보수 조정": "–" if adj is None or abs(adj) < 1e-9 else f"{adj:+.3g}%/년"})
         if k in CATALOG and CATALOG[k].note:
             notes.append(f"{CATALOG[k].label}: {CATALOG[k].note}")
-    sources = pd.DataFrame(rows, columns=["자산", "티커", "설명", "시작", "끝"])
+    sources = pd.DataFrame(rows, columns=SOURCE_COLS + (["연보수 조정"] if costs else []))
     if any(currency_of(k) != base for k in series) and fetch_fred_krw().empty:
         notes.append("미국 연준(FRED) 환율을 받지 못해 원/달러 환율은 야후(2003년 12월~) 것만 썼어요. "
                      "더 이전부터 보려면 계산 통화를 달러로 바꿔 보세요.")
@@ -524,13 +634,18 @@ def run_backtest(portfolios: list[Portfolio], start: date, end: date, initial: f
         if len(frame) < 2:
             notes.append(f"'{p.name}'은(는) 기간 안에 데이터가 부족해요.")
             continue
-        sim = simulate(frame, w, initial, monthly, rebalance)
+        sim = simulate(frame, w, initial, monthly, rebalance,
+                       {k: (costs.get(k) or {}).get("trade") or 0.0 for k in w})
         stats = metrics(sim, rf_idx)
         f = fx.reindex(sim.index.union(fx.index)).ffill().reindex(sim.index)
         other = sim["value"] / f if base == "KRW" else sim["value"] * f
         results.append(Result(p.name, sim, stats, w, other))
     real_start = min((r.sim.index[0] for r in results), default=common_start)
     real_end = max((r.sim.index[-1] for r in results), default=want_end)
+    if costs and results:
+        notes.append("매매 수수료(살 때·리밸런싱 때)와 ETF 연보수를 반영했어요. 연보수는 ETF 가격에 이미 매일 빠져 있어서, "
+                     "지수·선물·세계은행 금처럼 보수가 없는 구간은 내 ETF 보수만큼 빼고, 다른 ETF·펀드 구간은 "
+                     "보수 차이만큼만 조정했어요(‘데이터 출처’ 탭의 ‘연보수 조정’). 세금·환전 수수료는 빼지 않았어요.")
     if trend_pos is not None and any("BTC_TREND" in r.weights for r in results):
         notes.append(trend_summary(trend_pos, real_start, real_end))
     return Run(results, base, real_start, real_end, sources, notes, fx)
@@ -663,7 +778,9 @@ def run_from_json(d: dict, settings: dict | None = None) -> Run:
         sim = pd.DataFrame({c: pd.Series(r[c], dtype=float).to_numpy() for c in ("value", "invested", "nav")}, index=idx)
         other = pd.Series(pd.Series(r["other"], dtype=float).to_numpy(), index=idx)
         results.append(Result(r["name"], sim, _dec(r["stats"]), r["weights"], other))
-    sources = pd.DataFrame(d.get("sources") or [], columns=["자산", "티커", "설명", "시작", "끝"])
+    src = d.get("sources") or []
+    extra = ["연보수 조정"] if any("연보수 조정" in x for x in src) else []
+    sources = pd.DataFrame(src, columns=SOURCE_COLS + extra)
     return Run(results, d["base"], pd.Timestamp(d["start"]), pd.Timestamp(d["end"]), sources,
                list(d.get("notes") or []), pd.Series(dtype=float), settings or {})
 
