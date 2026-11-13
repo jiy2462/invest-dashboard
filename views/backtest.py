@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from lib import backtest as bt
+from lib import fees
 from lib import portfolio as pf
 from lib import ui
 
@@ -21,7 +22,8 @@ MAX_SLOTS = 3
 
 st.title("백테스트")
 st.caption("자산군과 비중을 골라 1970년부터 어떻게 됐을지 계산해요(처음에는 최근 30년). 배당은 재투자한 것으로 보고, "
-           "세금·수수료는 빼지 않았어요. 대표 ETF가 생기기 전 기간은 비슷한 펀드나 지수로 이어 붙여요.")
+           "매매 수수료와 ETF 연보수는 아래 ‘비용 가정’대로 반영해요(세금·환전 수수료는 빼지 않아요). "
+           "대표 ETF가 생기기 전 기간은 비슷한 펀드나 지수로 이어 붙여요.")
 
 # ── 저장한 조합·내 목표 비중 ─────────────────────────────────
 try:
@@ -100,6 +102,8 @@ st.session_state.setdefault("bt_base", "KRW")
 st.session_state.setdefault("bt_bench", "US_STOCK")
 st.session_state.setdefault("bt_n", 2)
 st.session_state.setdefault("bt_trend", False)
+st.session_state.setdefault("bt_cost", True)
+st.session_state.setdefault("bt_cost_over", {})   # 자산 키 → {"trade", "er"} (비용 가정 표에서 고친 값)
 for _ccy, _init in (("KRW", 10_000_000.0), ("USD", 10_000.0)):
     st.session_state.setdefault(f"bt_init_{_ccy}", _init)
     st.session_state.setdefault(f"bt_monthly_{_ccy}", 0.0)
@@ -139,6 +143,11 @@ def open_saved(run_id: int) -> None:
     if cfg.get("benchmark") in ["없음"] + list(bt.CATALOG):
         st.session_state["bt_bench"] = cfg["benchmark"]
     st.session_state["bt_trend"] = bool(cfg.get("btc_trend"))
+    st.session_state["bt_cost"] = bool(cfg.get("costs"))
+    if cfg.get("costs"):
+        st.session_state["bt_cost_over"] = {k: {"trade": v.get("trade"), "er": v.get("er")}
+                                            for k, v in cfg["costs"].items()}
+        st.session_state["bt_cost_ver"] = st.session_state.get("bt_cost_ver", 0) + 1
     ports = (cfg.get("portfolios") or [])[:MAX_SLOTS]
     if ports:
         st.session_state["bt_n"] = len(ports)
@@ -156,9 +165,13 @@ def settings_text(cfg: dict) -> str:
     bench_key = cfg.get("benchmark") or "없음"
     bench_label = bt.CATALOG[bench_key].label if bench_key in bt.CATALOG else "없음"
     trend = " · 비트코인 돌파 버전 함께 비교" if cfg.get("btc_trend") else ""
+    costs = cfg.get("costs")
+    cost = (" · 수수료·연보수 반영 (" + ", ".join(
+        f"{bt.label_of(k)} {float(v.get('trade') or 0):g}%" + (f"/보수 {float(v['er']):g}%" if v.get("er") is not None else "")
+        for k, v in costs.items()) + ")") if costs else " · 수수료·연보수 미반영"
     return (f"{cfg.get('start')} ~ {cfg.get('end')} · 계산 통화 {ccy} · 초기 {sym}{float(cfg.get('initial') or 0):,.0f}"
             f" · 월 적립 {sym}{float(cfg.get('monthly') or 0):,.0f} · 리밸런싱 {bt.REBALANCE.get(cfg.get('rebalance'), '–')}"
-            f" · 비교 기준 {bench_label}{trend}")
+            f" · 비교 기준 {bench_label}{trend}{cost}")
 
 
 try:
@@ -267,6 +280,50 @@ if saved:
                 bt.delete_preset(p["id"])
                 st.rerun()
 
+# ── 비용 가정 ───────────────────────────────────────────────
+cost_keys = sorted({k for p in portfolios for k, v in p.weights.items() if v > 0}
+                   | ({bench} if bench != "없음" else set())
+                   | ({"BTC_TREND"} if trend_cmp and any("BTC" in p.weights for p in portfolios) else set()),
+                   key=bt.label_of)
+cost_defaults = bt.default_costs(cost_keys, fees.load())
+costs: dict[str, dict] | None = None
+with ui.card("bt-costs"):
+    use_cost = st.toggle("매매 수수료·ETF 연보수 반영", key="bt_cost",
+                         help="끄면 예전처럼 수수료·보수 없이 계산해요(비교용).")
+    if use_cost and cost_keys:
+        over = st.session_state["bt_cost_over"]
+        cost_df = pd.DataFrame([{
+            "key": k, "자산": bt.label_of(k), "기준": cost_defaults[k]["basis"],
+            "매매 수수료(%)": (over.get(k) or {}).get("trade", cost_defaults[k]["trade"]),
+            "연보수(%)": (over.get(k) or cost_defaults[k]).get("er"),
+        } for k in cost_keys])
+        with st.expander("비용 가정 (자산별) · 고치면 이번 계산에 써요"):
+            st.caption("매매 수수료는 살 때(초기·월 적립)와 리밸런싱으로 사고팔 때 거래금액에 매겨요. "
+                       "연보수는 내가 살 ETF 기준이고, ETF 가격에 이미 들어 있는 보수와의 차이만 조정해요. "
+                       "기본값은 ‘포트폴리오 → 설정 → 수수료·연보수’ 요율에서 와요. 연보수 칸을 비우면 데이터 그대로 써요.")
+            ed = st.data_editor(
+                cost_df, hide_index=True, width="stretch", disabled=["자산", "기준"],
+                key=f"bt_cost_ed_{'-'.join(cost_keys)}_{st.session_state.get('bt_cost_ver', 0)}",
+                column_config={"key": None,
+                               "매매 수수료(%)": st.column_config.NumberColumn(min_value=0.0, format="%.4f"),
+                               "연보수(%)": st.column_config.NumberColumn(min_value=0.0, format="%.4f")})
+            if st.button("기본값으로", key="bt_cost_reset"):
+                st.session_state["bt_cost_over"] = {}
+                st.session_state["bt_cost_ver"] = st.session_state.get("bt_cost_ver", 0) + 1
+                st.rerun()
+        costs = {}
+        for _, r in ed.iterrows():
+            trade = 0.0 if pd.isna(r["매매 수수료(%)"]) else float(r["매매 수수료(%)"])
+            er = None if pd.isna(r["연보수(%)"]) else float(r["연보수(%)"])
+            costs[r["key"]] = {"trade": trade, "er": er}
+            d = cost_defaults[r["key"]]
+            if abs(trade - d["trade"]) > 1e-12 or er != d["er"]:
+                over[r["key"]] = {"trade": trade, "er": er}
+            else:
+                over.pop(r["key"], None)
+        st.caption(" · ".join(f"{bt.label_of(k)} {v['trade']:g}%" + (f", 보수 {v['er']:g}%" if v["er"] is not None else "")
+                              for k, v in costs.items()))
+
 for p in problems:
     st.warning(p)
 
@@ -285,9 +342,10 @@ if st.button("백테스트 실행", type="primary", disabled=not portfolios):
         except Exception as e:
             st.error(f"시세를 받지 못했어요: {e}")
             st.stop()
-        result = bt.run_backtest(runs, start, end, initial, monthly, rebalance, base, hist)
+        result = bt.run_backtest(runs, start, end, initial, monthly, rebalance, base, hist, costs)
         result.settings = {"start": str(start), "end": str(end), "base": base, "rebalance": rebalance,
                            "initial": float(initial), "monthly": float(monthly), "benchmark": bench,
+                           "costs": costs or None,
                            "btc_trend": bool(trend_cmp), "portfolios": [{"name": p.name, "weights": p.weights} for p in portfolios]}
         st.session_state["bt_run"] = result
         st.session_state.pop("bt_saved_meta", None)
@@ -372,6 +430,8 @@ for r in run.results:
         "총 투자금": money(s["invested"], run.base),
         "연평균 수익률 (CAGR)": pct(s["cagr"]),
     }
+    if (run.settings or {}).get("costs") or s.get("fees_paid"):
+        row["낸 매매 수수료 (합계)"] = money(s.get("fees_paid") or 0.0, run.base)
     if has_monthly:
         row["적립 포함 연수익률 (IRR)"] = pct(s["irr"])
     row.update({

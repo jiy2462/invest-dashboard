@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from lib import fees
 from lib import plan as pl
 from lib import portfolio as pf
 from lib import ui
@@ -30,6 +31,7 @@ try:
     cash_all = pf.list_cash()
     goal_total = float(pf.get_setting("goal_total", 0) or 0)
     plan = pl.load_plan(targets)
+    rates = fees.load()
     today = datetime.now(ZoneInfo("Asia/Seoul")).date()
     auto_rules = pf.get_auto_deposits()
     deposited = pf.apply_auto_deposits(today) if auto_rules else []
@@ -195,6 +197,15 @@ def acc_label(i) -> str:
     return "선택 안 함" if i is None else acc_name.get(i, str(i))
 
 
+def auto_fee(account, qty: float, price: float, ccy: str) -> tuple[float | None, float]:
+    """계좌 증권사 요율과 그 요율로 계산한 매매 수수료. (요율 %, 수수료)"""
+    r = fees.rate_for_account(account, accounts, rates)
+    return r, fees.trade_fee(qty, price, r, ccy)
+
+
+FEE_HELP = "비워 두면 계좌 증권사의 매매 수수료율로 계산해 넣어요. 실제 금액을 알면 직접 넣으세요."
+
+
 try:
     inbox = ib.list_items("pending")
     inbox_ok = True
@@ -255,13 +266,20 @@ with tab_hold:
             rows["손익"] = money(held["pnl"], held["currency"])
             rows["수익률"] = held["pnl_pct"]
         rows["비중"] = held["value_krw"] / total_value * 100 if total_value else 0.0
+        er, er_cost, er_base = fees.yearly_cost(held, rates)
+        rows["연보수"] = er
         rows["시세"] = held["symbol"].map(lambda s: price_src.get(s, "없음"))
         st.dataframe(rows, hide_index=True, width="stretch", column_config={
             "수량": st.column_config.NumberColumn(format="%.6g"),
             **{c: NUM for c in rows.columns if c.startswith(("평단", "현재가", "평가금액", "손익"))},
-            "수익률": PCT, "비중": WEIGHT})
+            "수익률": PCT, "비중": WEIGHT,
+            "연보수": st.column_config.NumberColumn(format="%.4g%%", help="ETF 1년 보수. 기준가에 매일 나눠 반영돼요.")})
         st.caption("원화로 보기의 손익에는 환율 변동이 포함돼요 (원가는 거래 당시 환율, 평가는 현재 환율). "
                    "평단은 이동평균법이라 매도해도 평단이 바뀌지 않아요.")
+        if er_cost > 0:
+            st.caption(f"ETF 연보수: 지금 평가금액 기준 1년에 약 ₩{er_cost:,.0f} (보수 있는 ETF ₩{er_base:,.0f}의 "
+                       f"평균 {er_cost / er_base * 100:.3f}%). 보수는 ETF 가격에 매일 조금씩 이미 빠져 있어서, "
+                       "위 손익·수익률에서 따로 한 번 더 빼지 않았어요.")
         missing = held.loc[held["price_missing"], "symbol"].map(name_of).tolist()
         if missing:
             st.warning(f"시세를 못 받아 원가로 표시한 종목: {', '.join(missing)}. ‘설정 → 종목’에서 현재가를 직접 넣을 수 있어요.")
@@ -360,26 +378,33 @@ with tab_buy:
         b_date = c1.date_input("매수 날짜", today, key="buy-date")
         b_acc = c2.selectbox("계좌", acc_ids, format_func=acc_label, key=f"buy-account-{b_sym}",
                              index=acc_ids.index(last_acc) if last_acc in acc_ids else 0)
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         b_qty = c1.number_input("주식 수", min_value=0.0, step=1.0, format="%.8g", key="buy-qty")
         b_price = c2.number_input(f"주식 가격 ({b_ccy})", min_value=0.0, step=1.0, format="%.4f", key="buy-price")
+        b_fee = c3.number_input(f"수수료 ({b_ccy})", min_value=0.0, value=None, step=1.0, format="%.4f",
+                                key="buy-fee", placeholder="자동", help=FEE_HELP)
         b_fx = None
         if b_ccy != "KRW":
-            b_fx = c3.number_input(f"환율 (원/{b_ccy})", min_value=0.0, value=float(fx.get(b_ccy, 0.0)), step=1.0,
+            b_fx = c4.number_input(f"환율 (원/{b_ccy})", min_value=0.0, value=float(fx.get(b_ccy, 0.0)), step=1.0,
                                    format="%.2f", key="buy-fx", help="원화 원가 계산용. 현재 환율이 미리 들어가 있어요.")
         b_memo = st.text_input("메모", placeholder="정기 매수, 5% 하락 분할 …", key="buy-memo")
         go_buy = st.form_submit_button("매수 저장", type="primary", disabled=not b_sym)
+    st.caption("수수료를 비워 두면 계좌 증권사 요율로 자동 계산해요 (" + ", ".join(
+        f"{k} {v:g}%" for k, v in rates["brokers"].items()) + "). 요율은 ‘설정 → 수수료·연보수’에서 바꿀 수 있어요.")
     if go_buy:
         if b_qty <= 0 or b_price <= 0:
             st.error("주식 수와 주식 가격을 넣어 주세요.")
         else:
             if b_new:
                 pf.upsert_asset(**b_new)
+            b_rate, b_auto = auto_fee(b_acc, b_qty, b_price, b_ccy)
+            b_fee = b_auto if b_fee is None else b_fee
             pf.add_transaction({"trade_date": b_date, "account_id": b_acc, "symbol": b_sym, "side": "buy",
-                                "quantity": b_qty, "price": b_price, "currency": b_ccy, "fee": 0.0,
+                                "quantity": b_qty, "price": b_price, "currency": b_ccy, "fee": b_fee,
                                 "fx_rate": b_fx or None, "memo": b_memo or None})
+            fee_txt = f"₩{b_fee:,.0f}" if b_ccy == "KRW" else f"{b_fee:,.2f} {b_ccy}"
             st.session_state["buy-saved"] = (f"{b_new['name'] if b_new else name_of(b_sym)} {b_qty:g}주 × "
-                                             f"{b_price:,.4g} {b_ccy} 매수를 저장했어요.")
+                                             f"{b_price:,.4g} {b_ccy} 매수를 저장했어요 (수수료 {fee_txt}).")
             st.rerun()
     if st.session_state.get("buy-saved"):
         st.success(st.session_state.pop("buy-saved"))
@@ -388,10 +413,10 @@ with tab_buy:
         st.markdown("**최근 매수**")
         st.dataframe(pd.DataFrame({
             "날짜": recent["trade_date"], "종목": recent["symbol"].map(name_of), "주식 수": recent["quantity"],
-            "가격": recent["price"], "통화": recent["currency"], "계좌": recent["account_id"].map(acc_name).fillna(""),
-            "메모": recent["memo"].fillna(""),
+            "가격": recent["price"], "수수료": recent["fee"], "통화": recent["currency"],
+            "계좌": recent["account_id"].map(acc_name).fillna(""), "메모": recent["memo"].fillna(""),
         }), hide_index=True, width="stretch", column_config={
-            "주식 수": st.column_config.NumberColumn(format="%.8g"), "가격": NUM})
+            "주식 수": st.column_config.NumberColumn(format="%.8g"), "가격": NUM, "수수료": NUM})
         st.caption("잘못 넣었으면 ‘매도·배당·거래 내역’ 탭의 ‘거래 삭제’에서 지울 수 있어요.")
 
 
@@ -654,7 +679,13 @@ with tab_tx:
     else:
         qty = c1.number_input("수량", min_value=0.0, step=1.0, format="%.8g", key="tx-qty")
         price = c2.number_input(f"단가 ({ccy})", min_value=0.0, step=1.0, format="%.4f", key="tx-price")
-    fee = c3.number_input(f"수수료·세금 ({ccy})", min_value=0.0, step=1.0, format="%.4f", key="tx-fee")
+    fee_in = c3.number_input(f"수수료·세금 ({ccy})", min_value=0.0, value=None, step=1.0, format="%.4f", key="tx-fee",
+                             placeholder="자동" if side != "dividend" else "0", help=FEE_HELP)
+    if side == "dividend":
+        fee = fee_in or 0.0
+    else:
+        tx_rate, tx_auto = auto_fee(account, qty, price, ccy)
+        fee = tx_auto if fee_in is None else fee_in
     fx_rate = None
     if ccy != "KRW":
         fx_rate = c4.number_input(f"환율 (원/{ccy})", min_value=0.0, value=float(fx.get(ccy, 0.0)), step=1.0,
@@ -663,7 +694,10 @@ with tab_tx:
     amount = qty * price + fee if side == "buy" else (qty * price - fee if side == "sell" else price - fee)
     if sym and amount:
         st.caption(f"{pf.SIDES[side]} 금액 {amount:,.2f} {ccy}" +
-                   (f" ≈ ₩{amount * fx_rate:,.0f}" if fx_rate else ""))
+                   (f" ≈ ₩{amount * fx_rate:,.0f}" if fx_rate else "") +
+                   (f" · 수수료 {fee:,.2f} {ccy}" if side != "dividend" else ""))
+    if side != "dividend" and fee_in is None:
+        st.caption(fees.fee_hint(tx_rate, tx_auto, ccy))
     held_qty = float(positions.set_index("symbol")["quantity"].get(sym, 0.0)) if sym and not positions.empty else 0.0
     if side == "sell" and sym and qty > held_qty + 1e-9:
         st.warning(f"보유 수량({held_qty:g})보다 많이 팔 수 없어요.")
@@ -773,8 +807,17 @@ with tab_inbox:
                                         value=float(guess["quantity"] or 0.0), key=f"{p}-qty")
                 i_price = c2.number_input(f"단가 ({i_ccy})", min_value=0.0, step=1.0, format="%.4f",
                                           value=float(guess["price"] or 0.0), key=f"{p}-price")
-            i_fee = c3.number_input(f"수수료·세금 ({i_ccy})", min_value=0.0, step=1.0, format="%.4f",
-                                    value=float(guess["fee"] or 0.0), key=f"{p}-fee")
+            # 알림에 수수료가 적혀 있으면 그 값, 없으면 비워 두고 계좌 증권사 요율로 계산한다.
+            i_fee_in = c3.number_input(f"수수료·세금 ({i_ccy})", min_value=0.0, step=1.0, format="%.4f",
+                                       value=float(guess["fee"]) if guess["fee"] else None, key=f"{p}-fee",
+                                       placeholder="자동" if i_side != "dividend" else "0", help=FEE_HELP)
+            if i_side == "dividend":
+                i_fee = i_fee_in or 0.0
+            else:
+                i_rate, i_auto = auto_fee(i_acc, i_qty, i_price, i_ccy)
+                i_fee = i_auto if i_fee_in is None else i_fee_in
+                if i_fee_in is None and i_qty > 0 and i_price > 0:
+                    st.caption(fees.fee_hint(i_rate, i_auto, i_ccy))
             i_fx = None
             if i_ccy != "KRW":
                 i_fx = c4.number_input(f"환율 (원/{i_ccy})", min_value=0.0, value=float(fx.get(i_ccy, 0.0)), step=1.0,
@@ -1067,6 +1110,35 @@ with tab_set:
                     st.session_state.pop(k, None)
                 st.toast(f"{', '.join(del_cls)} 행을 삭제했어요.")
                 st.rerun()
+
+    st.subheader("수수료·연보수")
+    st.caption("매매 수수료율은 계좌의 ‘증권사’ 이름과 같은 줄을 써요. 거래를 넣을 때 수수료 칸을 비워 두면 "
+               "거래금액 × 요율로 계산해 넣어요(원화는 원 미만 버림). 알림에 수수료가 적혀 있으면 그 값을 써요. "
+               "연보수는 보유 현황의 ‘연보수’ 칸과 백테스트의 비용 가정에 쓰여요.")
+    r1, r2 = st.columns(2)
+    broker_df = pd.DataFrame({"증권사": list(rates["brokers"]), "수수료율(%)": list(rates["brokers"].values())})
+    er_df = pd.DataFrame({"티커": list(rates["expense"]), "연보수(%)": list(rates["expense"].values())})
+    with r1:
+        st.markdown("**매매 수수료율 (증권사별)**")
+        b_edit = st.data_editor(broker_df, num_rows="dynamic", hide_index=True, width="stretch", key="fee-broker",
+                                column_config={"증권사": st.column_config.SelectboxColumn(
+                                    options=sorted(set(accounts["broker"].dropna()) | set(rates["brokers"])),
+                                    required=True),
+                                    "수수료율(%)": st.column_config.NumberColumn(min_value=0, format="%.4f")})
+    with r2:
+        st.markdown("**ETF 연보수 (종목별)**")
+        e_edit = st.data_editor(er_df, num_rows="dynamic", hide_index=True, width="stretch", key="fee-expense",
+                                column_config={"티커": st.column_config.TextColumn(required=True),
+                                               "연보수(%)": st.column_config.NumberColumn(min_value=0, format="%.4f")})
+        e_names = [name_of(t) for t in e_edit["티커"].dropna() if t in asset_info]
+        if e_names:
+            st.caption("등록된 종목: " + ", ".join(e_names))
+    if st.button("수수료·연보수 저장", key="save-fees", type="primary"):
+        fees.save(dict(zip(b_edit["증권사"], b_edit["수수료율(%)"])), dict(zip(e_edit["티커"], e_edit["연보수(%)"])))
+        for k in ("fee-broker", "fee-expense"):
+            st.session_state.pop(k, None)
+        st.toast("수수료·연보수를 저장했어요.")
+        st.rerun()
 
     st.subheader("종목")
     if assets.empty:
