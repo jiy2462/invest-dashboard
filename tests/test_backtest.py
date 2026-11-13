@@ -183,8 +183,22 @@ def test_months_to_recover_principal():
     assert round(lr["months"]) == 10 and lr["recovered"]
     pr = m["peak_recovery"]                    # 2021-06 하락은 아직 회복 중이지만 더 짧다
     assert pr["recovered"] and round(pr["months"]) == 10
+    vr = m["value_peak_recovery"]             # 잔고 기준도 같은 데이터면 2020-01 고점을 2021-01에 회복
+    assert vr["recovered"] and vr["start"] == pd.Timestamp("2020-03-01")
     still = bt.longest_spell(pd.Series([False, True, True], index=idx[:3]))
     assert not still["recovered"] and still["end"] == idx[2]
+
+
+def test_value_peak_recovery_counts_contributions():
+    """적립금이 들어오면 수익률은 아직 고점 아래여도 잔고는 먼저 전고점을 넘는다."""
+    idx = pd.to_datetime(["2020-01-01", "2020-02-01", "2020-03-01", "2020-04-01", "2020-05-01", "2020-12-01"])
+    nav = pd.Series([1.0, 0.8, 0.85, 0.9, 0.95, 1.01], index=idx)
+    invested = pd.Series([100.0, 100, 120, 140, 160, 180], index=idx)
+    sim = pd.DataFrame({"nav": nav, "invested": invested, "value": [100, 80, 102, 126, 152, 181.8]}, index=idx)
+    m = bt.metrics(sim)
+    assert round(m["peak_recovery"]["months"]) == 10          # 수익률은 2020-12에야 회복
+    vr = m["value_peak_recovery"]
+    assert vr["recovered"] and vr["end"] == pd.Timestamp("2020-03-01") and round(vr["months"]) == 1
 
 
 def test_semiannual_rebalance_happens_in_january_and_july():
