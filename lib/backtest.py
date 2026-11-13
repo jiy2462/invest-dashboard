@@ -4,6 +4,8 @@
 앞 티커가 없는 기간은 다음 티커의 일별 수익률로 채운다(어느 구간에 무엇을 썼는지 기록).
 계산 함수는 네트워크 없이 pandas만으로 동작한다(테스트 용이). 시세는 yfinance로 받고,
 야후에 없는 오래된 금 시세는 저장소에 넣어 둔 세계은행 월평균 가격(data/gold_usd_monthly.csv)을 쓴다.
+'비트코인 40/20 돌파' 자산은 받은 시세로 만드는 가짜 티커(BTC_TREND_T)다: 비트코인 트레이딩 화면과 같은 신호로
+비트코인과 미국 초단기 국채 사이를 오가는 한 '주머니'의 가격 지수.
 """
 from __future__ import annotations
 
@@ -25,6 +27,8 @@ CUSTOM = "T:"          # 직접 입력한 티커는 'T:AAPL'처럼 저장한다
 FX = "KRW=X"           # 원/달러 (야후는 2003년 말부터)
 RF = "^IRX"            # 미국 3개월 국채 금리(연 %): 샤프 지수의 무위험 수익률
 GOLD_WB = "WB:GOLD"    # 세계은행 금 월평균 가격(1968~2000). 야후가 아니라 저장소 파일에서 읽는다
+BTC_TREND_T = "SIG:BTC40/20"   # 비트코인 40/20 돌파 주머니 (받은 시세로 계산하는 가짜 티커)
+TREND_BUY_N, TREND_SELL_N, TREND_FEE = 40, 20, 0.05
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 REBALANCE = {"none": "안 함", "quarterly": "분기마다", "semiannual": "6개월마다", "yearly": "1년마다"}
 
@@ -55,7 +59,14 @@ CATALOG: dict[str, AssetClass] = {
     "COMMODITY": AssetClass("원자재", "USD", ("DBC", "^SPGSCI")),
     "REIT": AssetClass("미국 리츠", "USD", ("VNQ", "VGSIX")),
     "BTC": AssetClass("비트코인", "USD", ("BTC-USD",), "야후 데이터는 2014년 9월부터"),
+    "BTC_TREND": AssetClass(
+        "비트코인 40/20 돌파 (쉬는 동안 초단기 국채)", "USD", (BTC_TREND_T,),
+        "비트코인 트레이딩 화면과 같은 규칙이에요. 종가가 직전 40일 최고 종가를 넘으면 비트코인을 사고, "
+        "직전 20일 최저 종가 아래로 내려가면 팔아서 미국 초단기 국채(BIL)에 둬요. 신호 난 날 종가(UTC 0시)에 "
+        "바꾸고 수수료는 한 번에 0.05%예요. 적립·리밸런싱 때는 이 몫을 한 자산으로 다뤄서, "
+        "쉬는 동안 들어온 적립금은 국채에 쌓였다가 매수 신호 때 함께 비트코인으로 바뀌어요"),
 }
+TREND_BASE = {"BTC_TREND": "BTC"}   # 돌파 전략 자산 ← 원래 자산 (돌파 버전 함께 비교할 때 바꿔 넣는다)
 
 TICKER_NOTES = {
     "VFINX": "뱅가드 S&P 500 펀드 (배당 재투자)",
@@ -72,6 +83,7 @@ TICKER_NOTES = {
     "VIPSX": "뱅가드 물가연동채 펀드",
     "GC=F": "금 선물 (근월물)",
     GOLD_WB: "세계은행 금 월평균 가격 (런던 시세, 월별)",
+    BTC_TREND_T: "BTC-USD 일봉 40/20 신호로 비트코인 ↔ 미국 초단기 국채(BIL) 전환",
     "^SPGSCI": "S&P GSCI 원자재 지수",
     "VGSIX": "뱅가드 리츠 펀드",
 }
@@ -230,6 +242,54 @@ def fx_series(hist: dict[str, pd.Series]) -> pd.Series:
     if y.empty:
         return f
     return pd.concat([f[f.index < y.index[0]], y])
+
+
+# ── 비트코인 40/20 돌파 주머니 ─────────────────────────────
+
+def trend_sleeve(btc: pd.Series, cash: pd.Series, buy_n: int = TREND_BUY_N, sell_n: int = TREND_SELL_N,
+                 fee_pct: float = TREND_FEE) -> tuple[pd.Series, pd.Series]:
+    """(주머니 가격 지수(USD, 1에서 시작), 보유 상태(1=비트코인, 0=국채)). 날짜는 비트코인 일봉 기준.
+
+    신호는 lib.btc_trading과 같다(오늘 종가 vs 오늘을 뺀 직전 N일). 신호 난 날 종가에 바꾸므로
+    그날 수익률은 바꾸기 전 자산을 따르고, 바꿀 때마다 수수료를 뗀다.
+    """
+    from lib import btc_trading   # 비트코인 화면과 같은 신호 함수를 쓴다
+
+    btc = btc.sort_index()
+    pos = btc_trading.compute_signals(pd.DataFrame({"Close": btc}), buy_n, sell_n)["Position"]
+    c = cash.sort_index()
+    c = c.reindex(c.index.union(btc.index)).ffill().reindex(btc.index).bfill()
+    held = pos.shift(1).fillna(0.0)
+    trade = pos.diff().abs().fillna(pos.abs())
+    growth = 1 + held * btc.pct_change().fillna(0.0) + (1 - held) * c.pct_change().fillna(0.0)
+    return (growth * (1 - fee_pct / 100 * trade)).cumprod(), pos
+
+
+def add_derived(hist: dict[str, pd.Series], keys) -> tuple[dict[str, pd.Series], pd.Series | None]:
+    """돌파 주머니가 필요하면 받은 시세로 만들어 hist에 넣는다(원본은 건드리지 않음). (hist, 보유 상태)"""
+    if not any(k in TREND_BASE for k in keys) or BTC_TREND_T in hist:
+        return hist, None
+    btc = hist.get("BTC-USD")
+    cash, _ = splice(CATALOG["US_STB"].chain, hist)
+    if btc is None or len(btc) < 2 or cash.empty:
+        return hist, None
+    sleeve, pos = trend_sleeve(btc, cash)
+    return {**hist, BTC_TREND_T: sleeve}, pos
+
+
+def trend_variant(p: "Portfolio") -> "Portfolio | None":
+    """비트코인 몫을 돌파 전략으로 바꾼 조합. 비트코인이 없으면 None."""
+    base_to_trend = {v: k for k, v in TREND_BASE.items()}
+    if not any(base_to_trend.get(k) and v > 0 for k, v in p.weights.items()):
+        return None
+    w: dict[str, float] = {}
+    for k, v in p.weights.items():
+        nk = base_to_trend.get(k, k)
+        w[nk] = w.get(nk, 0) + v
+    return Portfolio(p.name + TREND_SUFFIX, w)
+
+
+TREND_SUFFIX = " · 비트코인 돌파"
 
 
 # ── 시뮬레이션 ────────────────────────────────────────────
@@ -404,14 +464,18 @@ class Run:
 def needed_tickers(keys: set[str]) -> tuple[str, ...]:
     ts = {FX, RF}
     for k in keys:
-        ts.update(chain_of(k))
-    return tuple(sorted(ts - set(LOCAL_SOURCES)))
+        if k in TREND_BASE:   # 돌파 주머니는 비트코인과 초단기 국채 시세로 만든다
+            ts.update(chain_of(TREND_BASE[k]) + CATALOG["US_STB"].chain)
+        else:
+            ts.update(chain_of(k))
+    return tuple(sorted(ts - set(LOCAL_SOURCES) - {BTC_TREND_T}))
 
 
 def run_backtest(portfolios: list[Portfolio], start: date, end: date, initial: float, monthly: float,
                  rebalance: str, base: str, hist: dict[str, pd.Series]) -> Run:
     keys = {k for p in portfolios for k, v in p.weights.items() if v > 0}
     notes: list[str] = []
+    hist, trend_pos = add_derived(hist, keys)
     fx = fx_series(hist)
     series: dict[str, pd.Series] = {}
     rows = []
@@ -467,7 +531,20 @@ def run_backtest(portfolios: list[Portfolio], start: date, end: date, initial: f
         results.append(Result(p.name, sim, stats, w, other))
     real_start = min((r.sim.index[0] for r in results), default=common_start)
     real_end = max((r.sim.index[-1] for r in results), default=want_end)
+    if trend_pos is not None and any("BTC_TREND" in r.weights for r in results):
+        notes.append(trend_summary(trend_pos, real_start, real_end))
     return Run(results, base, real_start, real_end, sources, notes, fx)
+
+
+def trend_summary(pos: pd.Series, start: pd.Timestamp, end: pd.Timestamp) -> str:
+    """기간 안에서 돌파 전략이 비트코인을 들고 있던 비율과 매수 횟수, 마지막 상태."""
+    p = pos[(pos.index >= start) & (pos.index <= end)]
+    if p.empty:
+        return ""
+    buys = int((p.diff().fillna(p) > 0).sum())
+    last = "비트코인 보유 중" if p.iloc[-1] > 0 else "국채에서 쉬는 중"
+    return (f"비트코인 40/20 돌파: 기간 중 {p.mean() * 100:.0f}% 동안 비트코인을 들고 있었고, 매수 {buys}번, "
+            f"{p.index[-1].date()} 기준 {last}이에요.")
 
 
 def series_rf(hist: dict[str, pd.Series]) -> pd.Series:

@@ -99,6 +99,7 @@ st.session_state.setdefault("bt_rebal", "yearly")
 st.session_state.setdefault("bt_base", "KRW")
 st.session_state.setdefault("bt_bench", "US_STOCK")
 st.session_state.setdefault("bt_n", 2)
+st.session_state.setdefault("bt_trend", False)
 for _ccy, _init in (("KRW", 10_000_000.0), ("USD", 10_000.0)):
     st.session_state.setdefault(f"bt_init_{_ccy}", _init)
     st.session_state.setdefault(f"bt_monthly_{_ccy}", 0.0)
@@ -137,6 +138,7 @@ def open_saved(run_id: int) -> None:
         st.session_state["bt_rebal"] = cfg["rebalance"]
     if cfg.get("benchmark") in ["없음"] + list(bt.CATALOG):
         st.session_state["bt_bench"] = cfg["benchmark"]
+    st.session_state["bt_trend"] = bool(cfg.get("btc_trend"))
     ports = (cfg.get("portfolios") or [])[:MAX_SLOTS]
     if ports:
         st.session_state["bt_n"] = len(ports)
@@ -153,9 +155,10 @@ def settings_text(cfg: dict) -> str:
     sym = "₩" if ccy == "KRW" else "$"
     bench_key = cfg.get("benchmark") or "없음"
     bench_label = bt.CATALOG[bench_key].label if bench_key in bt.CATALOG else "없음"
+    trend = " · 비트코인 돌파 버전 함께 비교" if cfg.get("btc_trend") else ""
     return (f"{cfg.get('start')} ~ {cfg.get('end')} · 계산 통화 {ccy} · 초기 {sym}{float(cfg.get('initial') or 0):,.0f}"
             f" · 월 적립 {sym}{float(cfg.get('monthly') or 0):,.0f} · 리밸런싱 {bt.REBALANCE.get(cfg.get('rebalance'), '–')}"
-            f" · 비교 기준 {bench_label}")
+            f" · 비교 기준 {bench_label}{trend}")
 
 
 try:
@@ -202,6 +205,12 @@ with ui.card("bt-settings"):
     bench = d3.selectbox("비교 기준", bench_opts, key="bt_bench",
                          format_func=lambda k: k if k == "없음" else bt.CATALOG[k].label)
     n_slots = d4.radio("비교할 조합 수", [1, 2, 3], horizontal=True, key="bt_n")
+    trend_cmp = st.checkbox(
+        "비트코인 몫을 40/20 돌파 전략으로 바꾼 버전도 함께 비교", key="bt_trend",
+        help="비트코인이 든 조합마다, 비트코인 몫만 '비트코인 트레이딩' 화면과 같은 규칙으로 굴린 버전을 하나 더 계산해요. "
+             "종가가 직전 40일 최고 종가를 넘으면 사고, 직전 20일 최저 종가 아래면 팔아서 미국 초단기 국채에 둬요. "
+             "그래프에서는 같은 색 점선으로 보여요. 조합 표에서 자산을 "
+             f"‘{bt.CATALOG['BTC_TREND'].label}’로 직접 골라도 돼요.")
 
 if start >= end:
     st.error("시작일이 종료일보다 앞이어야 해요.")
@@ -263,6 +272,10 @@ for p in problems:
 
 if st.button("백테스트 실행", type="primary", disabled=not portfolios):
     runs = list(portfolios)
+    if trend_cmp:
+        runs = [x for p in portfolios for x in (p, bt.trend_variant(p)) if x is not None]
+        if len(runs) == len(portfolios):
+            st.info("비트코인이 든 조합이 없어서 돌파 전략 버전은 만들지 않았어요.")
     if bench != "없음":
         runs.append(bt.Portfolio(f"비교 기준: {bt.CATALOG[bench].label}", {bench: 100}))
     keys = {k for p in runs for k in p.weights}
@@ -275,7 +288,7 @@ if st.button("백테스트 실행", type="primary", disabled=not portfolios):
         result = bt.run_backtest(runs, start, end, initial, monthly, rebalance, base, hist)
         result.settings = {"start": str(start), "end": str(end), "base": base, "rebalance": rebalance,
                            "initial": float(initial), "monthly": float(monthly), "benchmark": bench,
-                           "portfolios": [{"name": p.name, "weights": p.weights} for p in portfolios]}
+                           "btc_trend": bool(trend_cmp), "portfolios": [{"name": p.name, "weights": p.weights} for p in portfolios]}
         st.session_state["bt_run"] = result
         st.session_state.pop("bt_saved_meta", None)
 
@@ -383,12 +396,23 @@ st.caption("CAGR·변동성·MDD·샤프는 적립금 영향을 뺀 수익률로
            f"‘잔고 기준’은 적립금까지 넣은 내 잔고({run.base})가 전고점을 되찾는 데 걸린 기간이에요(자산 곡선 그래프와 같아요). "
            "적립을 하면 새로 넣는 돈이 잔고를 끌어올려서 잔고 기준이 보통 더 짧아요.")
 
-colors = {r.name: (BENCH if r.name.startswith("비교 기준") else LINES[i % len(LINES)])
-          for i, r in enumerate(run.results)}
+def is_variant(name: str) -> bool:
+    """'비트코인 돌파' 비교 버전인가 (원래 조합과 같은 색, 점선으로 그린다)."""
+    return name.endswith(bt.TREND_SUFFIX)
+
+
+colors: dict[str, str] = {}
+for r in run.results:
+    if r.name.startswith("비교 기준"):
+        colors[r.name] = BENCH
+    elif is_variant(r.name) and r.name.removesuffix(bt.TREND_SUFFIX) in colors:
+        colors[r.name] = colors[r.name.removesuffix(bt.TREND_SUFFIX)]
+    else:
+        colors[r.name] = LINES[sum(not is_variant(n) for n in colors if not n.startswith("비교 기준")) % len(LINES)]
 
 
 def dash(name: str) -> str:
-    return "dot" if name.startswith("비교 기준") else "solid"
+    return "dot" if name.startswith("비교 기준") else "dash" if is_variant(name) else "solid"
 
 
 t1, t2, t3, t4 = st.tabs(["자산 곡선", "낙폭", "연도별 수익률", "데이터 출처"])
@@ -432,7 +456,8 @@ with t3:
     fig = go.Figure()
     for r in run.results:
         fig.add_trace(go.Bar(x=yearly.index, y=yearly[r.name], name=r.name, marker_color=colors[r.name],
-                             hovertemplate="%{y:+.1f}%"))
+                             marker_pattern_shape="/" if is_variant(r.name) else "",
+                             opacity=0.6 if is_variant(r.name) else 1.0, hovertemplate="%{y:+.1f}%"))
     fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0), barmode="group", hovermode="x unified",
                       yaxis=dict(ticksuffix="%"), legend=dict(orientation="h", y=-0.15))
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key="bt_yearly")
