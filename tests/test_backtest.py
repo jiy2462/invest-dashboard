@@ -252,3 +252,59 @@ def test_save_view_and_delete_backtest_run():
     [b for b in at.button if b.label == "삭제" and str(b.key).startswith("bt_rdel")][0].click().run()
     assert not at.exception
     assert fakes.TABLES["backtest_runs"] == []
+
+
+# ── 비트코인 40/20 돌파 주머니 ───────────────────────────────
+
+def test_trend_sleeve_switches_between_btc_and_cash():
+    # 45일 횡보 → 10일 상승(매수) → 25일 하락(매도) → 10일 횡보
+    up = list(np.linspace(101, 100, 45)) + [110 + 10 * i for i in range(10)]
+    down = [200 - 5 * i for i in range(1, 26)]
+    btc = series("2020-01-01", up + down + [down[-1]] * 10, freq="D")
+    cash = series("2020-01-01", 100 * 1.0001 ** np.arange(len(btc)), freq="D")
+    sleeve, pos = bt.trend_sleeve(btc, cash, fee_pct=0.0)
+    buy_day = pos[pos > 0].index[0]
+    sell_day = pos[(pos.diff() < 0)].index[0]
+    assert buy_day == btc.index[45]                               # 직전 40일 최고 종가를 처음 넘은 날
+    assert buy_day < sell_day and pos.iloc[-1] == 0
+    # 들고 있는 동안은 비트코인 수익률, 쉬는 동안은 국채 수익률을 따른다
+    hold = sleeve.loc[buy_day:sell_day]
+    assert hold.iloc[-1] / hold.iloc[0] == pytest.approx(btc[sell_day] / btc[buy_day])
+    rest = sleeve.loc[sell_day:]
+    assert rest.iloc[-1] / rest.iloc[0] == pytest.approx(1.0001 ** (len(rest) - 1))
+    # 수수료는 바꿀 때마다 뗀다
+    with_fee, _ = bt.trend_sleeve(btc, cash, fee_pct=0.05)
+    assert with_fee.iloc[-1] == pytest.approx(sleeve.iloc[-1] * 0.9995 ** 2)
+
+
+def test_trend_variant_and_run_backtest():
+    p = bt.Portfolio("50/50 + gold 15 + bit 5", {"US_STOCK": 40, "NASDAQ100": 40, "GOLD": 15, "BTC": 5})
+    v = bt.trend_variant(p)
+    assert v.name == "50/50 + gold 15 + bit 5" + bt.TREND_SUFFIX
+    assert v.weights == {"US_STOCK": 40, "NASDAQ100": 40, "GOLD": 15, "BTC_TREND": 5}
+    assert bt.trend_variant(bt.Portfolio("60/40", {"US_STOCK": 60, "US_ITB": 40})) is None
+    ticks = bt.needed_tickers({"BTC_TREND"})
+    assert {"BTC-USD", "BIL"} <= set(ticks) and bt.BTC_TREND_T not in ticks
+    hist = fakes.fake_history(bt.needed_tickers(set(p.weights) | {"BTC_TREND"}))
+    res = bt.run_backtest([p, v], date(2014, 9, 17), date(2026, 11, 5), 0, 4_000_000, "semiannual", "KRW", hist)
+    assert [r.name for r in res.results] == [p.name, v.name]
+    assert res.results[0].sim.index[0] == res.results[1].sim.index[0]
+    assert res.results[1].sim["invested"].iloc[-1] == res.results[0].sim["invested"].iloc[-1]
+    assert any(n.startswith("비트코인 40/20 돌파:") for n in res.notes)
+    assert bt.BTC_TREND_T in set(res.sources["티커"])
+    assert bt.BTC_TREND_T not in hist                       # 받은 시세 원본은 그대로
+
+
+def test_backtest_page_adds_btc_trend_version():
+    fakes.TABLES["backtest_presets"] = [{"id": 1, "name": "비트 5", "start_date": "2016-01-01", "end_date": "2026-11-05",
+                                         "rebalance": "semiannual", "allocations": {"US_STOCK": 95, "BTC": 5}}]
+    at = run("backtest")
+    at.selectbox(key="bt_pick0").set_value("저장: 비트 5").run()
+    at.checkbox(key="bt_trend").check().run()
+    [b for b in at.button if b.label == "백테스트 실행"][0].click().run()
+    assert not at.exception
+    r = at.session_state.bt_run
+    names = [x.name for x in r.results]
+    assert names[:2] == ["비트 5", "비트 5" + bt.TREND_SUFFIX]
+    assert r.settings["btc_trend"] is True
+    assert sum(n.endswith(bt.TREND_SUFFIX) for n in names) == 1  # 비트코인 없는 조합은 그대로
