@@ -309,6 +309,14 @@ def spell_text(sp: dict | None, none: str) -> str:
     return f"{sp['months']:.0f}개월 ({span})"
 
 
+def value_peak_spell(r) -> dict | None:
+    """적립금 포함 잔고 기준 최장 고점 회복. 예전에 저장한 결과엔 없어서 저장된(주 단위) 잔고로 다시 계산."""
+    if "value_peak_recovery" in r.stats:
+        return r.stats["value_peak_recovery"]
+    v = r.sim["value"]
+    return bt.longest_spell(v < v.cummax())
+
+
 other_ccy = "USD" if run.base == "KRW" else "KRW"
 st.divider()
 st.subheader(f"결과 · {run.start.date()} ~ {run.end.date()} ({(run.end - run.start).days / 365.25:.1f}년)")
@@ -360,7 +368,8 @@ for r in run.results:
         "최고의 해": f"{s['best_year'][0]} {pct(s['best_year'][1])}" if s["best_year"] else "–",
         "최악의 해": f"{s['worst_year'][0]} {pct(s['worst_year'][1])}" if s["worst_year"] else "–",
         "원금 손실 → 원금 회복 (최장)": spell_text(s["loss_recovery"], "원금 아래로 내려간 적 없음"),
-        "고점 → 고점 회복 (최장)": spell_text(s["peak_recovery"], "–"),
+        "고점 → 고점 회복 (최장, 수익률 기준)": spell_text(s["peak_recovery"], "–"),
+        "고점 → 고점 회복 (최장, 잔고 기준)": spell_text(value_peak_spell(r), "–"),
     })
     rows.append(row)
 table = pd.DataFrame(rows).set_index("조합").T
@@ -369,7 +378,10 @@ st.caption("CAGR·변동성·MDD·샤프는 적립금 영향을 뺀 수익률로
            "샤프 지수의 무위험 수익률은 미국 3개월 국채 금리예요. "
            f"{other_ccy} 환산은 그날 환율로 바꾼 금액이에요. "
            "‘원금 손실 → 원금 회복’은 평가금액이 그때까지 넣은 돈보다 적어진 날부터 다시 넘어선 날까지, "
-           "‘고점 → 고점 회복’은 직전 최고점 아래로 내려간 날부터 그 고점을 되찾은 날까지예요.")
+           "‘고점 → 고점 회복’은 직전 최고점 아래로 내려간 날부터 그 고점을 되찾은 날까지예요. "
+           "‘수익률 기준’은 적립금을 뺀 수익률만 보고(낙폭 그래프와 같아요), "
+           f"‘잔고 기준’은 적립금까지 넣은 내 잔고({run.base})가 전고점을 되찾는 데 걸린 기간이에요(자산 곡선 그래프와 같아요). "
+           "적립을 하면 새로 넣는 돈이 잔고를 끌어올려서 잔고 기준이 보통 더 짧아요.")
 
 colors = {r.name: (BENCH if r.name.startswith("비교 기준") else LINES[i % len(LINES)])
           for i, r in enumerate(run.results)}

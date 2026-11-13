@@ -322,12 +322,14 @@ def metrics(sim: pd.DataFrame, rf_daily: pd.Series | None = None) -> dict:
     flows.append((sim.index[-1], float(sim["value"].iloc[-1])))
     peak_spell = longest_spell(nav < nav.cummax())
     loss_spell = longest_spell(sim["value"] < sim["invested"] - 1e-9)
+    value_spell = longest_spell(sim["value"] < sim["value"].cummax())
     return {
         "start": nav.index[0], "end": nav.index[-1], "years": years,
         "invested": float(sim["invested"].iloc[-1]), "final": float(sim["value"].iloc[-1]),
         "cagr": float(cagr), "irr": xirr(flows), "vol": vol, "mdd": float(dd.min()),
         "mdd_date": dd.idxmin(), "sharpe": sharpe,
-        "peak_recovery": peak_spell,       # 고점 아래 있던 가장 긴 기간
+        "peak_recovery": peak_spell,       # 수익률 지수(nav)가 고점 아래 있던 가장 긴 기간
+        "value_peak_recovery": value_spell,  # 적립금 포함 잔고가 고점 아래 있던 가장 긴 기간
         "loss_recovery": loss_spell,       # 평가금액이 투자 원금보다 적었던 가장 긴 기간
         "best_year": (int(yearly.idxmax()), float(yearly.max())) if not yearly.empty else None,
         "worst_year": (int(yearly.idxmin()), float(yearly.min())) if not yearly.empty else None,
