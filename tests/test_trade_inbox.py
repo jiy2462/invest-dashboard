@@ -123,3 +123,17 @@ def test_parse_decomposed_hangul_from_shortcut():
     g = ib.parse(None, nfd, "meritz", ASSETS, datetime(2026, 11, 12, 1, 34, tzinfo=ib.KST))
     assert (g["side"], g["symbol"], g["quantity"], g["price"], g["currency"]) == ("sell", "SGOV", 1, 100.52, "USD")
     assert g["trade_date"] == date(2026, 11, 11)
+
+
+def test_parse_nh_gold_alias():
+    """NH 금현물 체결 알림의 '금 99.99K'·'M04020000'은 등록한 'KRX 금현물'로 잡는다 (줄바꿈 없이 와도)."""
+    multi = ("NH투자증권\n[NH투자증권] 매수 주문체결 알림\n\n종 목 명 : 금 99.99K\n종목코드 : M04020000   \n"
+             "체결종류 : 매수 전량체결\n체결수량 : 1g\n체결단가 : 174,350원\n주문번호 : 0003297534")
+    one_line = ("NH투자증권 [NH투자증권] 매수 주문체결 알림  종 목 명 : 금 99.99K 종목코드 : M04020000  "
+                "체결종류 : 매수 전량체결 체결수량 : 1g 체결단가 : 168,310원 주문번호 : 0003371511")
+    for body, price in ((multi, 174350), (one_line, 168310)):
+        g = ib.parse(None, body, "nh", ASSETS, GOT)
+        assert (g["side"], g["symbol"], g["quantity"], g["price"], g["currency"]) == \
+            ("buy", "MANUAL:KRX 금현물", 1, price, "KRW")
+    # 금현물을 등록하지 않았으면 없는 종목을 만들어 넣지 않는다.
+    assert ib.parse(None, multi, "nh", ASSETS[ASSETS["symbol"] != "MANUAL:KRX 금현물"], GOT)["symbol"] is None

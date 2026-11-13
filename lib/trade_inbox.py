@@ -20,6 +20,13 @@ COLUMNS = ["id", "received_at", "source", "title", "body", "status", "transactio
 
 _NUM = r"([\d,]+(?:\.\d+)?)"
 
+# 알림에 적힌 이름·코드가 등록한 종목 이름과 다른 경우 (붙여 쓰고 대문자로 바꾼 글 기준)
+# NH투자증권 금현물 체결 알림: "종 목 명 : 금 99.99K / 종목코드 : M04020000" → KRX 금현물
+ALIASES = {
+    "금99.99K": "MANUAL:KRX 금현물",
+    "M04020000": "MANUAL:KRX 금현물",
+}
+
 
 # ── 저장 ────────────────────────────────────────────────────
 
@@ -116,6 +123,10 @@ def match_symbol(text: str, assets: pd.DataFrame) -> str | None:
                    key=lambda x: -len(x[0]))
     for name, sym in named:
         if len(_norm(name)) >= 3 and _norm(name) in flat:
+            return sym
+    registered = set(assets["symbol"].astype(str))
+    for alias, sym in ALIASES.items():
+        if sym in registered and _norm(alias) in flat:
             return sym
     words = set(re.findall(r"[A-Z][A-Z0-9.\-]{1,9}", text.upper()))
     codes = set(re.findall(r"(?<!\d)(\d{6})(?!\d)", text))

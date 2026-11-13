@@ -20,11 +20,19 @@ const BROKERS: Record<string, RegExp> = {
 // 체결·배당 알림에 들어가는 말 (광고·공지·결제 알림을 가려내려고)
 const TRADE_WORDS = /체결|매수|매도|매매|배당|분배금|입금|주문|\b(buy|sell|filled|dividend)\b/i;
 
+// NH투자증권 '입금안내'는 은행에서 계좌로 돈을 넣었다는 이체 알림이다(보낸 은행·출금가능금액만 있음).
+// 거래가 아니니 '자동 거름'으로 둔다. 배당·분배금 말이 함께 있으면 배당 입금일 수 있으니 거르지 않는다.
+const NH_DEPOSIT = /입금\s*안내/;
+const DIVIDEND_WORDS = /배당|분배금/;
+
 export type Verdict = { action: "keep" | "hold" | "drop"; reason?: string };
 
 export function judge(source: string, title: string, body: string): Verdict {
   const text = [title, body].filter(Boolean).join("\n");
   const broker = BROKERS[source];
+  if (source === "nh" && NH_DEPOSIT.test(text) && !DIVIDEND_WORDS.test(text)) {
+    return { action: "hold", reason: "NH 입금안내(이체)" };
+  }
   // 체결·배당 말이 있으면, 증권사 이름이 글에 없더라도 그 회사 자동화가 보낸 것이니 대기함에 올린다.
   if (TRADE_WORDS.test(text)) return { action: "keep" };
   if (broker && !broker.test(text)) return { action: "hold", reason: "증권사 이름·체결 말을 못 찾음" };
