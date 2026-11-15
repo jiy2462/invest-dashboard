@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   visit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # Playwright 브라우저가 공식 지원하는 OS로 고정
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
