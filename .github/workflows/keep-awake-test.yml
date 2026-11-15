@@ -20,17 +20,14 @@ jobs:
           APP_URL: ${{ secrets.APP_URL }}
         run: |
           if [ -n "$APP_URL" ]; then python scripts/keep_awake.py; else echo "APP_URL 비밀값 없음"; fi
+      - name: 실제 Streamlit Cloud 앱(영화 추천)으로 동작 확인
+        run: APP_URL=https://cine-taste.streamlit.app KEEP_AWAKE_READY_TEXTS=" " python scripts/keep_awake.py
       - name: 주소 후보 확인 (주소는 출력하지 않음)
         run: |
           i=0
           for u in https://invest-dashboard.streamlit.app https://jiy2462-invest-dashboard.streamlit.app https://invest-dashboard-jiy2462.streamlit.app; do
             i=$((i+1))
-            code=$(curl -s -o /tmp/p.html -w '%{http_code}' -L -m 30 "$u" || true)
-            title=$(grep -o '<title>[^<]*' /tmp/p.html | head -1 | sed 's/<title>//')
-            echo "후보 $i: HTTP $code 제목='$title'"
-            if [ "$code" = "200" ]; then
-              APP_URL="$u" KEEP_AWAKE_TIMEOUT=180 python scripts/keep_awake.py && echo "후보 $i 는 대시보드로 열림" || echo "후보 $i 는 대시보드 아님"
-            fi
+            APP_URL="$u" KEEP_AWAKE_TIMEOUT=90 python scripts/keep_awake.py >/tmp/o.txt 2>&1 && echo "후보 $i 는 대시보드로 열림" || echo "후보 $i 는 대시보드 아님"
           done
       - name: 예약 작업 다시 켜기 권한 확인
         env:

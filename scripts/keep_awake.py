@@ -20,7 +20,7 @@ from playwright.sync_api import Page, sync_playwright
 # 잠든 화면의 깨우기 버튼
 WAKE_BUTTON = re.compile(r"get this app back up", re.I)
 # 앱이 실제로 뜬 표시: 로그인 화면 또는 로그인된 화면에 있는 글자
-APP_READY_TEXTS = ("비밀번호", "투자 대시보드", "오늘의 시장")
+APP_READY_TEXTS = tuple(t for t in os.environ.get("KEEP_AWAKE_READY_TEXTS", "비밀번호,투자 대시보드,오늘의 시장").split(",") if t)
 LOAD_TIMEOUT_S = int(os.environ.get("KEEP_AWAKE_TIMEOUT", "300"))
 
 
