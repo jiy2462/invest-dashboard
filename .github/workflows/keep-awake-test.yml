@@ -1,0 +1,38 @@
+name: 앱 깨워 두기 (브랜치 시험용, 머지 전 삭제)
+on:
+  push:
+    branches: [claude/project-thread-y0hsm8]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "playwright==1.55.0" && python -m playwright install --with-deps chromium
+      - name: 비밀값 APP_URL 로 시험
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+        run: |
+          if [ -n "$APP_URL" ]; then python scripts/keep_awake.py; else echo "APP_URL 비밀값 없음"; fi
+      - name: 주소 후보 확인 (주소는 출력하지 않음)
+        run: |
+          i=0
+          for u in https://invest-dashboard.streamlit.app https://jiy2462-invest-dashboard.streamlit.app https://invest-dashboard-jiy2462.streamlit.app; do
+            i=$((i+1))
+            code=$(curl -s -o /tmp/p.html -w '%{http_code}' -L -m 30 "$u" || true)
+            title=$(grep -o '<title>[^<]*' /tmp/p.html | head -1 | sed 's/<title>//')
+            echo "후보 $i: HTTP $code 제목='$title'"
+            if [ "$code" = "200" ]; then
+              APP_URL="$u" KEEP_AWAKE_TIMEOUT=180 python scripts/keep_awake.py && echo "후보 $i 는 대시보드로 열림" || echo "후보 $i 는 대시보드 아님"
+            fi
+          done
+      - name: 예약 작업 다시 켜기 권한 확인
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/daily-insight.yml/enable" && echo "켜기 성공"

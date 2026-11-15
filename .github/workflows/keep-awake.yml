@@ -1,0 +1,42 @@
+name: 앱 깨워 두기
+
+# Streamlit Community Cloud는 12시간 동안 방문이 없으면 앱을 재운다.
+# 3시간마다 실제 브라우저로 앱을 열어(잠들어 있으면 깨우기 버튼까지 눌러) 깨어 있게 둔다.
+# 앱 주소는 저장소 비밀값 APP_URL 에 넣는다 (공개 저장소라 코드·로그에 주소를 남기지 않는다).
+on:
+  schedule:
+    - cron: "17 */3 * * *"   # 3시간마다 (UTC 00:17, 03:17, … = 한국 시간 09:17, 12:17, …)
+  workflow_dispatch: {}      # Actions 탭에서 직접 실행
+
+permissions:
+  contents: read
+  actions: write   # 예약 작업이 60일 뒤 꺼지지 않게 다시 켜기
+
+concurrency:
+  group: keep-awake
+  cancel-in-progress: false
+
+jobs:
+  visit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "playwright==1.55.0" && python -m playwright install --with-deps chromium
+      - run: python scripts/keep_awake.py
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+      # GitHub는 저장소에 60일 동안 활동이 없으면 예약 작업을 꺼 버린다.
+      # 예약 작업을 API로 다시 '켜기'하면 그 기간이 새로 시작된다(커밋을 만들지 않음).
+      - name: 예약 작업 꺼짐 방지
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for wf in keep-awake.yml daily-insight.yml month-end-snapshot.yml; do
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/$wf/enable" \
+              && echo "$wf 켜 둠" || echo "$wf 켜기 실패(무시)"
+          done
