@@ -229,7 +229,7 @@ def install() -> None:
         raise kr_rates.KrRateError("테스트: 접속 안 함")
 
     fear_greed.fetch = fake_fear_greed
-    kr_rates.fetch_investing = kr_rates.fetch_naver_daily = kr_rates.fetch_naver_bond = offline
+    kr_rates.fetch_naver = kr_rates.fetch_cnbc = offline
     symbols.krx_listing = lambda: KRX
     symbols.yf_search = lambda q: [{"symbol": "AAPL", "name": "Apple Inc.", "market": "NASDAQ"}] if "app" in q.lower() else []
     symbols.currency_for = lambda s: "KRW" if s.endswith(".KS") else "USD"
