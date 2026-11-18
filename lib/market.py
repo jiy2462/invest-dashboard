@@ -1,4 +1,4 @@
-"""시세 데이터 불러오기: yfinance(지수·환율·원자재·코인 등), 한국 금리는 네이버 금융 → 한국은행 ECOS 순서."""
+"""시세 데이터 불러오기: yfinance(지수·환율·원자재·코인 등), 한국 금리는 네이버 증권 → CNBC → 한국은행 ECOS 순서."""
 from __future__ import annotations
 
 import re
@@ -111,7 +111,7 @@ def fetch_ecos(symbol: str, api_key: str) -> pd.Series:
         f"{stat}/D/{start:%Y%m%d}/{end:%Y%m%d}/{item}"
     )
     try:
-        body = requests.get(url, timeout=15).json()
+        body = requests.get(url, timeout=(3.05, 8)).json()  # 해외 서버에선 접속이 안 되는 일이 많아 오래 기다리지 않는다
     except Exception as e:  # 접속 실패, JSON 아님
         raise EcosError(f"ECOS 접속 실패: {type(e).__name__}") from e
     if "RESULT" in body:  # 오류 응답: {"RESULT": {"CODE": "INFO-100", "MESSAGE": "..."}}
@@ -161,11 +161,11 @@ def _fetch_extra(sym: str, key: str) -> tuple[pd.Series | None, str | None]:
 
 
 def _kr_rate(sym: str, key: str) -> tuple[pd.Series | None, str | None]:
-    """한국 금리 하나: Investing.com → 네이버 금융 → (키가 있으면) 한국은행 ECOS 순서."""
+    """한국 금리 하나: 네이버 증권 → CNBC → (키가 있으면) 한국은행 ECOS 순서."""
     if sym not in ECOS_SERIES and sym not in kr_rates.SUPPORTED:
         return None, f"`{sym}`은 아직 지원하지 않는 한국 금리 지표예요"
     reasons = []
-    try:  # 1) Investing.com → 네이버 금융 (해외 서버에서도 열리는 곳)
+    try:  # 1) 네이버 증권 → CNBC (해외 서버에서도 열리는 곳)
         return kr_rates.fetch(sym), None
     except kr_rates.KrRateError as e:
         reasons.append(str(e))
@@ -210,6 +210,7 @@ EXTRA_SOURCES = ("ecos", "cnn")  # 야후 밖에서 지표마다 따로 받는 �
 LIVE_TTL = timedelta(minutes=5)   # 열린 장: 일봉(과거 포함)은 5분마다 새로
 QUOTE_TTL = timedelta(minutes=1)  # 열린 장: 오늘 봉(실시간 시세)은 1분마다 새로
 RETRY_TTL = timedelta(minutes=5)  # 못 받은 지표: 5분 뒤 다시 시도
+RETRY_TTL_EXTRA = timedelta(minutes=15)  # 못 받은 한국 금리: 출처 여러 곳을 기다려야 해서 15분 뒤에
 NAVER_OFF = timedelta(minutes=30)  # 네이버가 막히면 30분 동안은 야후만 쓴다 (매번 기다리지 않게)
 
 
@@ -243,7 +244,7 @@ def is_fresh(symbol: str, entry: dict | None, now: datetime) -> bool:
         return True
     age = now - entry["at"]
     if entry["df"] is None:
-        return age < RETRY_TTL
+        return age < (RETRY_TTL_EXTRA if symbol.lower().startswith("ecos:") else RETRY_TTL)
     if market_hours.is_live(symbol, now):
         return age < LIVE_TTL
     closed = market_hours.last_close(market_hours.market_of(symbol), now)
