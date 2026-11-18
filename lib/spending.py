@@ -210,6 +210,16 @@ def set_checked(row_id: int, checked: bool) -> None:
                          "checked_at": datetime.now(timezone.utc) if checked else None})
 
 
+def set_checked_many(row_ids: list[int], checked: bool = True) -> int:
+    """여러 줄의 확인 칸을 한 번의 요청으로 바꾼다. 바꾼 줄 수."""
+    row_ids = sorted({int(i) for i in row_ids})
+    if not row_ids:
+        return 0
+    stamp = datetime.now(timezone.utc).isoformat() if checked else None
+    _table().update({"checked": bool(checked), "checked_at": stamp}).in_("id", row_ids).execute()
+    return len(row_ids)
+
+
 def update(row_id: int, changes: dict) -> None:
     """사람이 고친 값 저장. 결제 정보를 고치면 다시 읽지 않도록 표시한다."""
     payload = dict(changes)
@@ -242,6 +252,7 @@ def apply_edits(edited_rows: dict, ids: list[int], kinds: list | None = None, am
     col = {"확인": "checked", "일시": "spent_at", "구분": "kind", "거래처": "merchant", "금액": "amount", "메모": "memo"}
     inv_kind = {v: k for k, v in KINDS.items()}
     n = 0
+    only_check: dict[bool, list[int]] = {True: [], False: []}     # 확인 칸만 바꾼 줄은 모아서 한 번에
     for pos, change in edited_rows.items():
         pos = int(pos)
         if pos >= len(ids):
@@ -273,9 +284,13 @@ def apply_edits(edited_rows: dict, ids: list[int], kinds: list | None = None, am
         elif "kind" in payload and amounts and pos < len(amounts) and amounts[pos] is not None \
                 and not pd.isna(amounts[pos]):
             payload["amount"] = signed(amounts[pos], kind)
-        if payload:
+        if set(payload) == {"checked"}:
+            only_check[payload["checked"]].append(int(ids[pos]))
+        elif payload:
             update(int(ids[pos]), payload)
             n += 1
+    for value, row_ids in only_check.items():
+        n += set_checked_many(row_ids, value)
     return n
 
 

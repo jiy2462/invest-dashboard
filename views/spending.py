@@ -74,12 +74,17 @@ if not view.empty and status != "전체":
 ver = st.session_state.setdefault("sp-ver", 0)
 
 
-def _save(ids: list[int], kinds: list, amounts: list, v: int) -> None:
-    state = st.session_state.get(f"sp-editor-{v}") or {}
-    n = sp.apply_edits(state.get("edited_rows") or {}, ids, kinds, amounts)
-    st.session_state["sp-ver"] = v + 1           # 표를 새로 그려 줄 번호가 어긋나지 않게
-    if n:
-        st.toast(f"{n}건 저장했어요.")
+def _save(key: str, ids: list[int], kinds: list, amounts: list, checked: list, check_all: bool = False) -> None:
+    """표에서 모아 둔 변경(확인 칸·값)을 한 번에 저장한다. check_all이면 보이는 줄을 모두 확인으로."""
+    edited = (st.session_state.get(key) or {}).get("edited_rows") or {}
+    n = sp.apply_edits(edited, ids, kinds, amounts)
+    if check_all:
+        def final(p: int) -> bool:
+            change = edited.get(p) or edited.get(str(p)) or {}
+            return bool(change.get("확인", checked[p]))
+        n += sp.set_checked_many([ids[p] for p in range(len(ids)) if not final(p)], True)
+    st.session_state["sp-ver"] = st.session_state.get("sp-ver", 0) + 1   # 표를 새로 그려 줄 번호가 어긋나지 않게
+    st.toast(f"{n}건 저장했어요." if n else "바뀐 내용이 없어요.")
 
 
 if view.empty:
@@ -102,8 +107,13 @@ else:
         table = table.drop(columns="통화")
     ids = [int(i) for i in view["id"]]
     kinds, amounts = list(view["kind"]), [None if pd.isna(a) else float(a) for a in view["amount"]]
-    st.data_editor(
-        table, hide_index=True, width="stretch", key=f"sp-editor-{ver}", on_change=_save, args=(ids, kinds, amounts, ver),
+    checked = [bool(c) for c in view["checked"]]
+    # 보이는 줄이 바뀌면(필터·새 알림) 표 열쇠도 바뀌어, 저장 안 한 체크가 엉뚱한 줄에 붙지 않는다.
+    key = f"sp-editor-{ver}-{hash(tuple(ids))}"
+    args = (key, ids, kinds, amounts, checked)
+    form = st.form("sp-table", border=False, enter_to_submit=False)
+    form.data_editor(
+        table, hide_index=True, width="stretch", key=key,
         disabled=["카드", "통화", "할부"],
         column_config={
             "확인": st.column_config.CheckboxColumn("확인", width="small", help="확인 완료한 내역에 체크"),
@@ -118,8 +128,15 @@ else:
             "메모": st.column_config.TextColumn("메모", width="medium"),
         },
     )
-    st.caption("확인 칸을 누르면 바로 저장돼요. 거래처·금액·일시를 고치면 그 값이 그대로 남아요. "
-               "취소 금액은 음수(-)로 보여요.")
+    left = sum(not c for c in checked)
+    b1, b2 = form.columns(2)
+    b1.form_submit_button("저장", type="primary", icon=":material/check:", width="stretch",
+                          on_click=_save, args=args)
+    b2.form_submit_button(f"보이는 내역 모두 확인 ({left}건)" if left else "보이는 내역 모두 확인",
+                          icon=":material/done_all:", width="stretch", disabled=not left,
+                          on_click=_save, args=args, kwargs={"check_all": True})
+    form.caption("확인 칸을 여러 개 체크하거나 값을 고친 뒤 ‘저장’을 한 번 누르면 한꺼번에 저장돼요. "
+                 "저장 전에 월·카드·확인 조건을 바꾸면 체크한 것이 사라져요. 취소 금액은 음수(-)로 보여요.")
 
 # ── 아래: 직접 추가 · 원문 · 결제 알림이 아닌 것 ─────────────
 with st.expander("직접 추가 (알림이 안 온 결제)"):
