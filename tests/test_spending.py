@@ -114,3 +114,37 @@ def test_spending_manual_add_and_empty():
     assert not at.exception
     r = fakes.TABLES["card_expenses"][-1]
     assert (r["merchant"], r["amount"], r["kind"], r["edited"]) == ("동네 빵집", 8000.0, "pay", True)
+
+
+def test_spending_check_many_saves_once():
+    """확인 칸만 바꾼 줄은 한 번의 요청으로 모아 저장한다."""
+    now = datetime.now(sp.KST).isoformat()
+    fakes.TABLES["card_expenses"] += [
+        _alert(i, "shinhan", f"가게{i}", kind="pay", merchant=f"가게{i}", amount=1000 * i, spent_at=now,
+               parse_version=sp.PARSER_VERSION) for i in (1, 2, 3, 4)]
+    calls = []
+    real = sp.set_checked_many
+    sp.set_checked_many = lambda ids, v=True: (calls.append((sorted(ids), v)) if ids else None) or real(ids, v)
+    try:
+        n = sp.apply_edits({0: {"확인": True}, 2: {"확인": True}, 3: {"메모": "점심"}}, [1, 2, 3, 4])
+    finally:
+        sp.set_checked_many = real
+    assert n == 3 and calls == [([1, 3], True)]
+    rows = {r["id"]: r for r in fakes.TABLES["card_expenses"]}
+    assert rows[1]["checked"] and rows[3]["checked"] and rows[1]["checked_at"]
+    assert not rows[2]["checked"] and rows[4]["memo"] == "점심" and not rows[4]["checked"]
+
+
+def test_spending_check_all_button():
+    now = datetime.now(sp.KST).isoformat()
+    fakes.TABLES["card_expenses"] += [
+        _alert(i, "shinhan", f"가게{i}", kind="pay", merchant=f"가게{i}", amount=1000, spent_at=now,
+               parse_version=sp.PARSER_VERSION, checked=(i == 1)) for i in (1, 2, 3)]
+    at = run("spending")
+    assert not at.exception
+    btn = [b for b in at.button if b.label.startswith("보이는 내역 모두 확인")][0]
+    assert btn.label == "보이는 내역 모두 확인 (2건)"
+    btn.click().run()
+    assert not at.exception
+    assert all(r["checked"] for r in fakes.TABLES["card_expenses"])
+    assert [b for b in at.button if b.label.startswith("보이는 내역 모두 확인")][0].disabled
