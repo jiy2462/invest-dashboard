@@ -1,0 +1,15 @@
+name: 임시 한국 금리 출처 확인
+on:
+  push:
+    branches: [claude/project-thread-u4ih1r]
+    paths: [scripts/probe_kr_rates.py, .github/workflows/probe-kr-rates.yml]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install requests
+      - run: python scripts/probe_kr_rates.py
