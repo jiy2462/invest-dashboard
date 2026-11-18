@@ -68,7 +68,7 @@ def parse_naver_prices(body) -> pd.DataFrame:
                     "Low": _num(r.get("lowPrice")), "Close": close}
     if not out:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
-    return pd.DataFrame.from_dict(out, orient="index").sort_index()
+    return pd.DataFrame.from_dict(out, orient="index").astype(float).sort_index()
 
 
 def parse_naver_now(body) -> pd.DataFrame:
@@ -141,7 +141,7 @@ def parse_cnbc_bars(body) -> pd.DataFrame:
                                 "Low": _num(b.get("low")), "Close": close}
     if not out:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
-    return pd.DataFrame.from_dict(out, orient="index").sort_index()
+    return pd.DataFrame.from_dict(out, orient="index").astype(float).sort_index()
 
 
 @st.cache_data(ttl=300, show_spinner=False)

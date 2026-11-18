@@ -34,6 +34,7 @@ def test_parse_naver_bond_page():
 def test_parse_naver_cd_page_zero_ohlc_becomes_close():
     df = kr_rates.parse_naver_prices(CD_PAGE)
     assert df["Close"].iloc[-1] == 3.38 and df["Open"].isna().all()
+    assert all(str(t) == "float64" for t in df.dtypes)
     filled = market.clean_ohlc(df)
     assert (filled["Open"] == filled["Close"]).all()
 
