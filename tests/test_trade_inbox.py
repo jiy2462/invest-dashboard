@@ -8,6 +8,19 @@ from tests import fakes
 from tests.test_pages import run
 from tests.test_portfolio import seed
 
+
+def selected_tab(at) -> str:
+    """화면에 처음 골라져 보일 탭 이름 (st.tabs의 default_tab_index)."""
+    def walk(node):
+        proto = getattr(node, "proto", None)
+        if proto is not None and hasattr(proto, "tab_container") and proto.HasField("tab_container"):
+            return proto.tab_container.default_tab_index
+        for child in (node.children.values() if isinstance(getattr(node, "children", None), dict) else []):
+            found = walk(child)
+            if found is not None:
+                return found
+    return at.tabs[walk(at._tree)].label
+
 ASSETS = pd.DataFrame([
     {"symbol": "360750.KS", "name": "TIGER 미국S&P500", "currency": "KRW"},
     {"symbol": "QQQM", "name": "Invesco NASDAQ 100 ETF", "currency": "USD"},
@@ -69,8 +82,10 @@ def test_inbox_tab_saves_and_ignores():
     assert at.number_input(key="ib1-qty").value == 4
     assert at.number_input(key="ib1-price").value == 88.25
     assert at.button(key="ib2-save").disabled           # 종목·값을 못 읽은 알림은 바로 못 넣는다
+    assert selected_tab(at) == "보유 현황"
     at.button(key="ib1-save").click().run()
     assert not at.exception
+    assert selected_tab(at) == "알림 대기함 1"     # 건수가 바뀌어도 대기함 탭에 그대로 머문다
     t = fakes.TABLES["transactions"][-1]
     assert (t["symbol"], t["side"], t["quantity"], t["price"], t["account_id"], t["memo"]) == \
         ("SPYM", "buy", 4, 88.25, 2, "알림 자동 입력")
@@ -81,7 +96,9 @@ def test_inbox_tab_saves_and_ignores():
     assert not at.exception
     assert next(r for r in fakes.TABLES["trade_inbox"] if r["id"] == 2)["status"] == "ignored"
     assert "알림 대기함" in [t.label for t in at.tabs]
+    assert selected_tab(at) == "알림 대기함"
     at.button(key="ib-restore-btn").click().run()
+    assert selected_tab(at) == "알림 대기함 1"
     assert next(r for r in fakes.TABLES["trade_inbox"] if r["id"] == 2)["status"] == "pending"
     assert at.selectbox(key="ib2-symbol").value is None  # 못 읽은 종목은 비워 둔다
 
