@@ -212,9 +212,19 @@ try:
 except Exception:
     inbox, inbox_ok = pd.DataFrame(columns=ib.COLUMNS), False
 
+# 대기함 탭 이름에 남은 건수가 붙어 있어서, 저장·무시로 건수가 바뀌면 탭 목록이 달라져 첫 탭으로 돌아간다.
+# 대기함에서 누른 버튼은 stay_on_inbox()로 표시해 두고, 다음 화면에서 대기함 탭을 골라 둔 채로 그린다.
+INBOX_TAB = f"알림 대기함 {len(inbox)}" if len(inbox) else "알림 대기함"
+
+
+def stay_on_inbox() -> None:
+    st.session_state["pf-stay-inbox"] = True
+
+
 tab_hold, tab_buy, tab_inbox, tab_alloc, tab_tx, tab_real, tab_fx, tab_set = st.tabs(
-    ["보유 현황", "매수 입력", f"알림 대기함 {len(inbox)}" if len(inbox) else "알림 대기함", "자산 배분·리밸런싱",
-     "매도·배당·거래 내역", "실현손익·배당", "달러 환전", "설정"])
+    ["보유 현황", "매수 입력", INBOX_TAB, "자산 배분·리밸런싱",
+     "매도·배당·거래 내역", "실현손익·배당", "달러 환전", "설정"],
+    default=INBOX_TAB if st.session_state.pop("pf-stay-inbox", False) else None)
 
 NUM = st.column_config.NumberColumn(format="localized")
 PCT = st.column_config.NumberColumn(format="%+.2f%%")
@@ -832,9 +842,11 @@ with tab_inbox:
                                              "fee": i_fee, "fx_rate": i_fx or None, "memo": "알림 자동 입력"})
                 ib.mark(iid, "done", new_id)
                 st.toast(f"{name_of(i_sym) if not i_new else i_new['name']} {pf.SIDES[i_side]} 기록을 저장했어요.")
+                stay_on_inbox()
                 st.rerun()
             if b2.button("무시", key=f"{p}-ignore", width="stretch"):
                 ib.mark(iid, "ignored")
+                stay_on_inbox()
                 st.rerun()
     if len(inbox) > INBOX_SHOW:
         st.caption(f"나머지 {len(inbox) - INBOX_SHOW}건은 위 알림을 처리하면 이어서 보여요.")
@@ -863,6 +875,7 @@ with tab_inbox:
                                         format_func=lambda i: str(ignored.set_index("id").loc[i, "body"])[:40])
                     if st.button("대기함으로 되돌리기", key="ib-restore-btn"):
                         ib.mark(int(back), "pending")
+                        stay_on_inbox()
                         st.rerun()
 
 # ── 실현손익·배당 ─────────────────────────────────────────
