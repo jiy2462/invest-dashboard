@@ -18,9 +18,9 @@ def fx_ticker(ccy: str) -> str:
 def held_symbols(tx_all: pd.DataFrame) -> set[str]:
     if tx_all.empty:
         return set()
-    q = tx_all["quantity"].where(tx_all["side"] == "buy", -tx_all["quantity"].where(tx_all["side"] == "sell", 0))
-    net = tx_all.assign(q=q).groupby("symbol")["q"].sum()
-    return set(net[net > 1e-9].index)   # 다 판 종목은 시세를 받지 않는다
+    # 다 판 종목(소수점 잔량만 남은 종목 포함)은 시세를 받지 않는다. 보유 현황과 같은 계산을 쓴다.
+    positions, _ = pf.compute_positions(tx_all)
+    return set(positions.loc[positions["quantity"] > 0, "symbol"])
 
 
 def quote_prices(tx_all: pd.DataFrame, cash_all: pd.DataFrame, asset_info: dict) -> tuple[dict, dict, dict]:
