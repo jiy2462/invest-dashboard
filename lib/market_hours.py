@@ -122,3 +122,37 @@ def is_live(symbol: str, now: datetime | None = None) -> bool:
 
 def status(symbol: str, now: datetime | None = None) -> str:
     return "장중" if is_open(market_of(symbol), now) else "장 마감"
+
+
+WEEKDAYS = "월화수목금토일"
+KST = ZoneInfo("Asia/Seoul")
+
+
+def day_label(day) -> str:
+    """11/25(수)"""
+    return f"{day:%m/%d}({WEEKDAYS[day.weekday()]})"
+
+
+def close_word(symbol: str) -> str:
+    """일봉 마지막 값을 부르는 말. 한국 금리는 고시·종가가 섞여 '기준', 공포·탐욕은 하루 마지막 점수."""
+    s = symbol.lower()
+    if s.startswith("ecos:") or s.startswith("cnn:"):
+        return "기준"
+    return "종가"
+
+
+def close_in_kst(symbol: str, day) -> str | None:
+    """해외 거래소 일봉이 한국 시각으로 언제 마감됐는지 ('11/26 06:00'). 한국 장·환율·선물·코인은 None.
+
+    미국 장 11/25 종가는 한국 시각 11/26 아침이라, 날짜가 하루 늦어 보이는 까닭을 같이 보여 준다.
+    """
+    market = market_of(symbol)
+    if market not in MARKETS or market == "kr":
+        return None
+    m = MARKETS[market]
+    close = datetime.combine(pd_date(day), m.close, ZoneInfo(m.tz)).astimezone(KST)
+    return f"{close:%m/%d %H:%M}"
+
+
+def pd_date(day):
+    return day.date() if hasattr(day, "date") else day
