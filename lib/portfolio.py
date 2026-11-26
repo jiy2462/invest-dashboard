@@ -323,6 +323,25 @@ def _fx_of(row, current_fx: dict[str, float]) -> float:
     return float(current_fx.get(row["currency"], np.nan))
 
 
+# 다 판 뒤에 남는 아주 작은 잔량(소수점 계산 오차, 시트 기록의 끝자리 반올림, 코인 먼지 등)은 보유로 보지 않는다.
+QTY_EPS = 1e-9        # 이보다 적은 수량은 무조건 0
+DUST_KRW = 100.0      # 1주(1개) 미만이면서 원화로 이 금액보다 적게 남으면 0
+
+
+def is_dust(qty: float, price: float | None = None, fx: float | None = None) -> bool:
+    """매도 후 남은 수량이 의미 없는 잔량인지. price·fx는 그 매도 가격과 환율(모르면 수량만 본다)."""
+    qty = abs(float(qty))
+    if qty < QTY_EPS:
+        return True
+    if qty >= 1 or price is None or fx is None:
+        return False
+    try:
+        value_krw = qty * float(price) * float(fx)
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isfinite(value_krw)) and value_krw < DUST_KRW
+
+
 def compute_positions(tx: pd.DataFrame, current_fx: dict[str, float] | None = None
                       ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """거래내역 → (종목별 보유 현황, 실현 이벤트(매도·배당) 목록).
@@ -330,6 +349,7 @@ def compute_positions(tx: pd.DataFrame, current_fx: dict[str, float] | None = No
     보유 현황 열: symbol, currency, quantity, avg_cost, cost, avg_cost_krw, cost_krw,
                  realized, realized_krw, dividends, dividends_krw, buy_total_krw
     원화 금액은 거래 당시 환율(fx_rate)로, 없으면 현재 환율로 계산한다.
+    매도 뒤 남는 수량이 잔량(is_dust)이면 그 매도로 전부 판 것으로 본다.
     """
     current_fx = current_fx or {}
     pos: dict[str, dict] = {}
@@ -343,7 +363,7 @@ def compute_positions(tx: pd.DataFrame, current_fx: dict[str, float] | None = No
         q, price, fee = float(t["quantity"]), float(t["price"]), float(t["fee"])
         if t["side"] == "buy":
             amount = q * price + fee
-            p["quantity"] += q
+            p["quantity"] = round(p["quantity"] + q, 10)
             p["cost"] += amount
             p["cost_krw"] += amount * fx
             p["buy_total_krw"] += amount * fx
@@ -354,12 +374,16 @@ def compute_positions(tx: pd.DataFrame, current_fx: dict[str, float] | None = No
                 continue
             avg, avg_krw = p["cost"] / held, p["cost_krw"] / held
             proceeds = q * price - fee
-            gain, gain_krw = proceeds - q * avg, proceeds * fx - q * avg_krw
-            p["quantity"] = held - q
-            p["cost"] -= q * avg
-            p["cost_krw"] -= q * avg_krw
-            if p["quantity"] < 1e-12:
+            # 남는 수량이 잔량이면 남은 원가까지 이번 매도에서 정리한다 (실현손익에 반영)
+            sold_all = is_dust(round(held - q, 10), price, fx)
+            sold_q = held if sold_all else q
+            gain, gain_krw = proceeds - sold_q * avg, proceeds * fx - sold_q * avg_krw
+            if sold_all:
                 p["quantity"] = p["cost"] = p["cost_krw"] = 0.0
+            else:
+                p["quantity"] = round(held - q, 10)
+                p["cost"] -= q * avg
+                p["cost_krw"] -= q * avg_krw
             p["realized"] += gain
             p["realized_krw"] += gain_krw
             events.append(dict(trade_date=t["trade_date"], symbol=sym, kind="매도", currency=t["currency"],

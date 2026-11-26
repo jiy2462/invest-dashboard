@@ -45,6 +45,45 @@ def test_full_sell_resets_and_krw_has_no_fx():
     assert p["realized_krw"] == pytest.approx(600000 - 500100)
 
 
+def test_sell_leaving_coin_dust_closes_position():
+    # 업비트 비트코인처럼 다 팔았는데 기록 끝자리 차이로 3사토시(약 3원)가 남는 경우
+    t = tx([
+        (1, "2026-10-01", "BTC-KRW", "buy", 0.03139455, 100_000_000, "KRW", 0, None),
+        (2, "2026-10-30", "BTC-KRW", "sell", 0.03139452, 105_650_000, "KRW", 0, None),
+    ])
+    pos, _ = pf.compute_positions(t)
+    p = pos.iloc[0]
+    assert p["quantity"] == 0 and p["cost"] == 0 and p["cost_krw"] == 0
+    # 남은 원가(약 3원)까지 실현손익에서 정리
+    assert p["realized_krw"] == pytest.approx(0.03139452 * 105_650_000 - 0.03139455 * 100_000_000)
+    v = pf.value_positions(pos, {"BTC-KRW": 130_000_000}, {}).iloc[0]
+    assert v["value_krw"] == 0
+    from lib import valuation
+    assert valuation.held_symbols(t) == set()
+
+
+def test_float_noise_after_fractional_sells_is_zero():
+    t = tx([
+        (1, "2026-01-02", "META", "buy", 0.1, 500, "USD", 0, 1400),
+        (2, "2026-01-03", "META", "buy", 0.2, 500, "USD", 0, 1400),
+        (3, "2026-01-04", "META", "sell", 0.3, 520, "USD", 0, 1400),   # 0.1+0.2 != 0.3 (부동소수점)
+    ])
+    pos, _ = pf.compute_positions(t)
+    assert pos.iloc[0]["quantity"] == 0
+
+
+def test_real_partial_holdings_are_kept():
+    t = tx([
+        (1, "2026-01-02", "BTC-KRW", "buy", 0.01, 100_000_000, "KRW", 0, None),
+        (2, "2026-01-03", "BTC-KRW", "sell", 0.0099, 100_000_000, "KRW", 0, None),   # 1만원어치 남음
+        (3, "2026-01-02", "005930.KS", "buy", 3, 50, "KRW", 0, None),
+        (4, "2026-01-03", "005930.KS", "sell", 2, 50, "KRW", 0, None),              # 1주는 금액이 작아도 보유
+    ])
+    pos = pf.compute_positions(t)[0].set_index("symbol")
+    assert pos.loc["BTC-KRW", "quantity"] == pytest.approx(0.0001)
+    assert pos.loc["005930.KS", "quantity"] == 1
+
+
 def test_missing_fx_uses_current_and_valuation():
     t = tx([(1, "2026-01-02", "SPYM", "buy", 2, 80, "USD", 0, None)])
     pos, _ = pf.compute_positions(t, {"USD": 1400})
