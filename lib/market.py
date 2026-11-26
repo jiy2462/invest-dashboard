@@ -48,10 +48,7 @@ def fetch_yf_closes(symbols: tuple[str, ...]) -> pd.DataFrame:
     return closes
 
 
-def fetch_yf_ohlc(symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
-    """여러 티커의 일봉(시가·고가·저가·종가)을 한 번의 요청으로 받는다. {티커: DataFrame}."""
-    if not symbols:
-        return {}
+def _download_daily(symbols: tuple[str, ...], threads: bool) -> dict[str, pd.DataFrame]:
     raw = yf.download(
         list(symbols),
         period=f"{HISTORY_DAYS}d",
@@ -59,7 +56,7 @@ def fetch_yf_ohlc(symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
         auto_adjust=False,
         progress=False,
         group_by="ticker",
-        threads=True,
+        threads=threads,
         timeout=10,
     )
     out: dict[str, pd.DataFrame] = {}
@@ -73,6 +70,20 @@ def fetch_yf_ohlc(symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
         df = clean_ohlc(df)
         if not df.empty:
             out[sym] = df
+    return out
+
+
+def fetch_yf_ohlc(symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
+    """여러 티커의 일봉(시가·고가·저가·종가)을 한 번의 요청으로 받는다. {티커: DataFrame}."""
+    if not symbols:
+        return {}
+    out = _download_daily(symbols, threads=True)
+    missed = tuple(s for s in symbols if s not in out)
+    if missed and len(missed) < len(symbols):  # 몇 개만 빠졌으면 (예: 'database is locked') 그것만 한 번 더
+        try:
+            out.update(_download_daily(missed, threads=False))
+        except Exception:
+            pass
     try:  # 야후가 빠뜨린 지난 거래일을 네이버·1시간봉으로 채운다
         out = gap_fill.fill(out)
     except Exception:
