@@ -1,23 +1,20 @@
-"""일회성 점검 3: 네이버 해외지수 실시간·CD 상세 원문."""
-import json, requests
-H = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0", "Referer": "https://m.stock.naver.com/"}
-for u in ["https://polling.finance.naver.com/api/realtime/worldstock/index/.N225",
-          "https://polling.finance.naver.com/api/realtime/worldstock/index/.HSI",
-          "https://api.stock.naver.com/index/.HSI/basic",
-          "https://api.stock.naver.com/marketindex/domesticInterest/KFIA114000",
-          "https://m.stock.naver.com/api/index/KOSDAQ/price?page=1&pageSize=3",
-          "https://api.stock.naver.com/index/.HSI/price?page=1&pageSize=3",
-          "https://m.stock.naver.com/front-api/marketIndex/productDetail?category=domesticInterest&reutersCode=KFIA114000"]:
-    r = requests.get(u, headers=H, timeout=8)
-    print("\nURL", u, r.status_code)
-    try:
-        b = r.json()
-        def strip(o):
-            if isinstance(o, dict):
-                return {k: strip(v) for k, v in o.items() if k not in ("stockExchangeType", "description", "itemLogoUrl", "itemLogoPngUrl")}
-            if isinstance(o, list):
-                return [strip(v) for v in o[:3]]
-            return o
-        print(json.dumps(strip(b), ensure_ascii=False)[:2500])
-    except Exception:
-        print(r.text[:500])
+"""일회성 점검 4: 고친 코드로 실제 데이터 받아 보기."""
+import sys, warnings
+from datetime import datetime, timezone
+sys.path.insert(0, ".")
+warnings.filterwarnings("ignore")
+import pandas as pd
+from lib import market, market_hours
+syms = ["^GSPC", "^KS11", "^KQ11", "^N225", "^HSI", "BTC-USD", "^VIX", "KRW=X"]
+settings = [{"symbol": s, "source": "yfinance"} for s in syms] + [
+    {"symbol": "ecos:CD91", "source": "ecos"}, {"symbol": "cnn:fear_greed", "source": "cnn"}]
+now = datetime.now(timezone.utc)
+data, errors = market.load_ohlc(settings, now=now)
+print("NOW", now, "errors", errors)
+for s in syms + ["ecos:CD91", "cnn:fear_greed"]:
+    df = data.get(s)
+    if df is None:
+        continue
+    sm = market.summarize(df["Close"], s.startswith("ecos"))
+    print(f"{s:10} last {df.index[-1].date()} close {sm['last']:.2f} pct {sm['pct']:+.2f}% vs {sm['prev_asof'].date()} "
+          f"src={df.attrs.get('source')} asof={df.attrs.get('asof')} | days={[d.strftime('%m-%d') for d in df.index[-4:]]}")

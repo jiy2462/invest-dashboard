@@ -11,7 +11,7 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-from lib import fear_greed, kr_rates, live_quote, market_hours
+from lib import fear_greed, gap_fill, kr_rates, live_quote, market_hours
 
 # ECOS 시장금리(일별) 통계표 817Y002의 항목 코드
 ECOS_SERIES = {
@@ -73,6 +73,10 @@ def fetch_yf_ohlc(symbols: tuple[str, ...]) -> dict[str, pd.DataFrame]:
         df = clean_ohlc(df)
         if not df.empty:
             out[sym] = df
+    try:  # 야후가 빠뜨린 지난 거래일을 네이버·1시간봉으로 채운다
+        out = gap_fill.fill(out)
+    except Exception:
+        pass
     return out
 
 
@@ -292,6 +296,7 @@ def _live_quotes(store: dict, symbols: tuple[str, ...], now: datetime) -> dict[s
     """장중 지표의 실시간 시세 (1분마다 새로). 지난 장 시세는 빼고 돌려준다.
 
     한국 지수·종목은 네이버(지연 없음)를 먼저 쓰고, 막히면 야후 1분봉(약 20분 지연)으로.
+    닛케이·항셍은 네이버(15분 지연)와 야후 중 더 최근 시세를 쓴다.
     """
     quotes = store.setdefault("quotes", {})
     stale = tuple(s for s in symbols if s not in quotes or now - quotes[s]["at"] >= QUOTE_TTL)
@@ -313,8 +318,8 @@ def _live_quotes(store: dict, symbols: tuple[str, ...], now: datetime) -> dict[s
                 except Exception:
                     continue
                 naver_ok = True
-                if live_quote.is_recent(q, now):
-                    got[s] = q
+                if q is not None and live_quote.is_recent(q, now) and (s not in got or q.at >= got[s].at):
+                    got[s] = q  # 둘 중 더 최근 시세 (한국은 네이버가 실시간, 해외 지수는 둘 다 지연)
             if naver_syms and not naver_ok:
                 store["naver_off_until"] = now + NAVER_OFF
         for s in stale:
@@ -347,6 +352,7 @@ def summarize(series: pd.Series, is_rate: bool) -> dict:
         "pct": pct,
         "bp": change * 100 if is_rate else None,
         "asof": series.index[-1],
+        "prev_asof": series.index[-2] if len(series) > 1 else None,  # 무엇과 비교했는지 (빈 날이 있으면 드러나게)
         "spark": series[series.index >= cutoff],
     }
 

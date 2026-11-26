@@ -22,9 +22,15 @@ KST = ZoneInfo("Asia/Seoul")
 MAX_AGE = timedelta(hours=12)  # 이보다 오래된 시세는 지난 장 것이라 쓰지 않는다 (장 하나는 8시간 안쪽)
 
 NAVER_INDEX = {"^KS11": "KOSPI", "^KQ11": "KOSDAQ", "^KS200": "KPI200"}
+# 해외 지수: 네이버는 15분 지연이지만, 야후 1분봉이 비는 날이 있어 (항셍, 2026-11-26) 함께 받는다
+NAVER_WORLD_INDEX = {"^N225": ".N225", "^HSI": ".HSI"}
 NAVER_URLS = (
     "https://polling.finance.naver.com/api/realtime/domestic/{kind}/{code}",
     "https://m.stock.naver.com/api/{kind}/{code}/basic",
+)
+NAVER_WORLD_URLS = (
+    "https://polling.finance.naver.com/api/realtime/worldstock/index/{code}",
+    "https://api.stock.naver.com/index/{code}/basic",
 )
 NAVER_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://m.stock.naver.com/"}
 
@@ -87,6 +93,8 @@ def apply(df: pd.DataFrame, q: Quote) -> pd.DataFrame:
 
 def naver_target(symbol: str) -> tuple[str, str] | None:
     s = symbol.upper()
+    if s in NAVER_WORLD_INDEX:
+        return "world", NAVER_WORLD_INDEX[s]
     if s in NAVER_INDEX:
         return "index", NAVER_INDEX[s]
     if s.endswith((".KS", ".KQ")) and s[:6].isalnum():
@@ -117,6 +125,8 @@ def parse_naver(body, symbol: str, now: datetime) -> Quote | None:
         price = _num(d.get("closePrice"))
         if not price:
             continue
+        if str(d.get("marketStatus") or "").upper() == "PREOPEN":
+            return None  # 장 시작 전: 현재가 자리에 어제 종가가 오늘 시각으로 들어 있다 (항셍, 2026-11-26)
         at = now
         raw = d.get("localTradedAt") or d.get("tradedAt")
         if raw:
@@ -139,7 +149,7 @@ def fetch_naver(symbol: str, now: datetime | None = None) -> Quote:
         raise ValueError(f"{symbol}: 네이버 대상 아님")
     kind, code = target
     last_err: Exception | None = None
-    for url in NAVER_URLS:
+    for url in NAVER_WORLD_URLS if kind == "world" else NAVER_URLS:
         try:
             r = requests.get(url.format(kind=kind, code=code), headers=NAVER_HEADERS, timeout=4)
             r.raise_for_status()

@@ -133,7 +133,9 @@ def fear_greed_card(name: str, symbol: str, df: pd.DataFrame) -> None:
             ago.append(f"<span style='white-space:nowrap'>{label} {past.iloc[-1]:.0f}</span>")
     if ago:
         st.markdown(f"<div class='ios-legend'>{' &nbsp;'.join(ago)}</div>", unsafe_allow_html=True)
-    st.caption(f"{score.index[-1]:%Y-%m-%d} 기준 · CNN")
+    day = score.index[-1]
+    prev = f" · {score.index[-2]:%m/%d} 대비" if len(score) > 1 else ""
+    st.caption(f"{market_hours.day_label(day)} 미국 장 기준 · CNN{prev}")
 
 
 def card(name: str, symbol: str, df: pd.DataFrame | None, is_rate: bool, error: str | None) -> None:
@@ -156,16 +158,28 @@ def card(name: str, symbol: str, df: pd.DataFrame | None, is_rate: bool, error: 
         legend = ma_legend(df)
         st.markdown(f"<div class='ios-legend'>{legend}</div>" if legend else "",
                     unsafe_allow_html=True)
-        st.caption(asof_caption(df, s["asof"], symbol))
+        st.caption(asof_caption(df, s, symbol))
 
 
-def asof_caption(df: pd.DataFrame, day: pd.Timestamp, symbol: str) -> str:
-    """카드 아래 '언제 시세인지'. 장중 실시간 시세를 붙였으면 한국 시각으로 몇 시 몇 분 시세인지 보여 준다."""
+def asof_caption(df: pd.DataFrame, s: dict, symbol: str) -> str:
+    """카드 아래 '언제 시세인지, 무엇과 비교했는지'. 장중 실시간 시세면 한국 시각으로 몇 시 몇 분 시세인지 보여 준다."""
     at = df.attrs.get("asof")
     if at is not None:
         kst = pd.Timestamp(at).tz_convert("Asia/Seoul")
-        return f"{kst:%m/%d %H:%M} 기준 · {market_hours.status(symbol)} · {df.attrs.get('source', '야후')}"
-    return f"{day:%Y-%m-%d} 기준 · {market_hours.status(symbol)}"
+        head = f"{kst:%m/%d %H:%M} 기준 · {market_hours.status(symbol)} · {df.attrs.get('source', '야후')}"
+    else:
+        head = f"{market_hours.day_label(s['asof'])} {market_hours.close_word(symbol)}"
+        kst_close = market_hours.close_in_kst(symbol, s["asof"])
+        if kst_close:
+            head += f" (한국 {kst_close})"
+        status = market_hours.status(symbol)
+        if status == "장중" and not symbol.lower().startswith(("ecos:", "cnn:")):
+            status = "장중이지만 오늘 시세 없음 (휴장일 수 있어요)"  # 예: 미국 추수감사절
+        head += f" · {status}"
+        if symbol.lower() == "ecos:cd91":
+            head += " · 금융투자협회 고시, 네이버에 1~2일 늦게 올라와요"
+    prev = s.get("prev_asof")
+    return head + (f" · {prev:%m/%d} 대비" if prev is not None else "")
 
 
 SORT_CSS = """
